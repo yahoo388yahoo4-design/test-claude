@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000">
+
+    <FrameLayout
+        android:id="@+id/previewHost"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="#99000000"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <Spinner
+            android:id="@+id/modeSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <CheckBox android:id="@+id/cbAudio" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="audio" android:textColor="#fff" />
+            <CheckBox android:id="@+id/cbRaw" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="RAW DNG" android:textColor="#fff" />
+            <CheckBox android:id="@+id/cbArRec" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="ARCore mp4" android:textColor="#fff" />
+            <CheckBox android:id="@+id/cbLock" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="lock AE/AF/AWB" android:textColor="#fff" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <CheckBox android:id="@+id/cbHiRes" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="hi-res stills" android:textColor="#fff" />
+            <CheckBox android:id="@+id/cbOisOff" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="OIS off" android:textColor="#fff" />
+            <CheckBox android:id="@+id/cbGeo" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Geospatial" android:textColor="#fff" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="#0f0"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="#99000000"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <EditText
+            android:id="@+id/uploadUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="upload receiver, e.g. http://192.168.1.10:8765"
+            android:inputType="textUri"
+            android:textColor="#fff"
+            android:textColorHint="#888" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <Button android:id="@+id/btnRecord" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Record" />
+            <Button android:id="@+id/btnCams" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Dump cams" />
+            <Button android:id="@+id/btnUpload" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Upload last" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>
