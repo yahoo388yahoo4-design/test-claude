@@ -116,6 +116,24 @@ final class OccupancyGrid {
         staticOcc[j * size + i] = 0
     }
 
+    /// The robot is standing here, so these cells are free: clears both layers inside the disc. Cells the
+    /// camera cannot see any more (under and beside the robot) would otherwise keep stale hits forever.
+    func clearDisc(center: P2, radius: Double) {
+        guard let (ci, cj) = cellOf(center) else { return }
+        let rc = Int(ceil(radius / cell))
+        for dj in -rc...rc {
+            for di in -rc...rc {
+                let i = ci + di, j = cj + dj
+                guard i >= 0, j >= 0, i < size, j < size else { continue }
+                if centerOf(i, j).distance(to: center) > radius { continue }
+                let k = j * size + i
+                logOdds[k] = min(logOdds[k], OccupancyGrid.staticOverride - 0.5)
+                staticOcc[k] = 0
+            }
+        }
+        version += 1
+    }
+
     func clearAllStatic() {
         for k in 0..<staticOcc.count { staticOcc[k] = 0 }
         version += 1

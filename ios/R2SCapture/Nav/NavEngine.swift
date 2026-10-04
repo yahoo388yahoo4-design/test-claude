@@ -46,13 +46,19 @@ struct NavHUD {
     var obstaclePoints = 0
     var thermal = "nominal"
     var logName = ""
+    var floorSource = FloorSource.estimate.rawValue
+    var frontSource = "-"            // what set the front gap: "LiDAR", "map" or "-"
+    var cliffPoints = 0
+    var debugObstacles: [SIMD3<Float>] = []   // LiDAR points counted as obstacles (debug overlay)
+    var debugCliffs: [SIMD3<Float>] = []      // points counted as drops
+    var debugVersion = 0
 }
 
 /// Navigation mode engine: its own ARSession (world tracking + LiDAR depth, optionally relocalised in a
 /// saved ARWorldMap), a live occupancy grid, A* planning, path following, obstacle safety, the robot link,
 /// voice / beep guidance and a log written as a session folder. All per-frame work runs on `queue`.
 final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
-    static let sectorBearings: [Double] = stride(from: 40.0, through: -40.0, by: -10.0).map { $0 } // left -> right
+    static let sectorBearings: [Double] = Perception.sectorBearings // left -> right
 
     let session = ARSession()
     let link = RobotLink()
@@ -87,7 +93,8 @@ final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var pose: Pose2?
     private var lastPose: Pose2?
     private var lastPoseT: TimeInterval = 0
-    private var floorY: Float?
+    private var floor = FloorEstimator()
+    private var prevLiveFrontGap = Double.infinity
     private var goal: P2?
     private var path: [P2] = []
     private var task: NavTask = .idle
@@ -187,7 +194,8 @@ final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.grid = OccupancyGrid(cell: 0.05, sizeMeters: 30)
             self.goal = nil
             self.path = []
-            self.floorY = nil
+            self.floor.reset()
+            self.h.floorFound = false
             self.pose = nil
             self.lastPose = nil
             var worldMap: ARWorldMap?
@@ -443,26 +451,27 @@ final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
         pose = newPose
         h.pose = newPose
 
-        // Floor height: the lowest floor plane below the camera, else the configured mount height.
+        // Floor height: the lowest floor-classified plane at least 10 cm below the camera, else the
+        // configured mount height (FloorEstimator snaps to the plane as soon as one exists).
         var planeFloor: Float?
         for a in frame.anchors {
             guard let p = a as? ARPlaneAnchor, p.alignment == .horizontal else { continue }
             let y = (p.transform * simd_float4(p.center, 1)).y
-            guard y < c.y - 0.05 else { continue }
+            guard y < c.y - 0.10 else { continue }
             var isFloor = false
             if case .floor = p.classification { isFloor = true }
-            if ARPlaneAnchor.isClassificationSupported, !isFloor, y > c.y - 0.15 { continue }
+            if ARPlaneAnchor.isClassificationSupported && !isFloor { continue }
             planeFloor = min(planeFloor ?? y, y)
         }
-        if let pf = planeFloor {
-            floorY = floorY.map { 0.9 * $0 + 0.1 * pf } ?? pf
-            h.floorFound = true
-        } else if !h.floorFound {
-            floorY = c.y - Float(cfg.mountHeight)
-        }
-        let fy = floorY ?? (c.y - Float(cfg.mountHeight))
+        floor.update(planeY: planeFloor.map { Double($0) }, cameraY: Double(c.y), mountHeight: cfg.mountHeight, now: now)
+        let fy = Float(floor.y ?? Double(c.y) - cfg.mountHeight)
+        h.floorFound = floor.source == .plane
+        h.floorSource = floor.source.rawValue
         h.floorY = fy
         h.cameraHeight = Double(c.y - fy)
+
+        // The robot is standing on its footprint, so those map cells are free.
+        if ok && !relocalising { grid.clearDisc(center: newPose.p, radius: cfg.robotRadius) }
 
         // Depth -> obstacles, sectors, grid (10 Hz).
         if ok, now - lastDepth >= 0.1, let depth = frame.smoothedSceneDepth ?? frame.sceneDepth {
@@ -473,12 +482,13 @@ final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
             lastDepthImage = now
             h.depthImage = DepthColormap.image(depth.depthMap, maxMeters: 4)
         }
-        if now - liveFrontT > 0.5 { liveFrontGap = .infinity }
+        if now - liveFrontT > 0.5 { liveFrontGap = .infinity; prevLiveFrontGap = .infinity }
 
-        // Virtual 360 lidar from the map (5 Hz).
+        // Virtual 360 lidar from the map (5 Hz); the map only means something once localised in it.
+        let mapUsable = ok && !relocalising
         if now - lastScan >= 0.2 {
             lastScan = now
-            let scan = grid.scan(pose: newPose, count: 72, maxRange: h.scanMax)
+            let scan = mapUsable ? grid.scan(pose: newPose, count: 72, maxRange: h.scanMax) : []
             h.scan = scan
             func window(_ centerDeg: Double, _ half: Double) -> Double {
                 var m = Double.infinity
@@ -506,7 +516,9 @@ final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
             h.nearest = nearest
             h.nearestBearing = deg(nb)
         }
-        h.frontGap = min(liveFrontGap, corridorGap(newPose))
+        let mapGap = mapUsable ? Perception.corridorGap(grid: grid, pose: newPose, radius: cfg.robotRadius) : .infinity
+        h.frontGap = min(liveFrontGap, mapGap)
+        h.frontSource = !h.frontGap.isFinite ? "-" : (liveFrontGap <= mapGap ? "LiDAR" : "map")
 
         // Plan (2 Hz).
         if ok, let g = goal, now - lastPlan >= 0.5 {
@@ -561,76 +573,49 @@ final class NavEngine: NSObject, ObservableObject, ARSessionDelegate {
         let sx = Float(w) / Float(res.width), sy = Float(hgt) / Float(res.height)
         let fx = K[0][0] * sx, fyy = K[1][1] * sy, cx = K[2][0] * sx, cy = K[2][1] * sy
         let T = frame.camera.transform
-        let robotH = Float(cfg.robotHeight)
-        let radius = cfg.robotRadius
         let sensor = P2(Double(T.columns.3.x), Double(T.columns.3.z))
-        let cosT = cos(pose.theta), sinT = sin(pose.theta)
 
-        var hits: [P2] = []
-        var floorPts: [P2] = []
-        hits.reserveCapacity(4096)
-        floorPts.reserveCapacity(4096)
-        var sectors = [Double](repeating: .infinity, count: NavEngine.sectorBearings.count)
-        var markers = [SIMD3<Float>?](repeating: nil, count: NavEngine.sectorBearings.count)
-        var frontGap = Double.infinity
-        var used = 0
+        var pts: [DepthPoint] = []
+        pts.reserveCapacity((w / 3 + 1) * (hgt / 3 + 1))
         let step = 3
         for v in stride(from: 0, to: hgt, by: step) {
             let row = base.advanced(by: v * rowBytes).assumingMemoryBound(to: Float32.self)
             let crow = confBase?.advanced(by: v * confRow).assumingMemoryBound(to: UInt8.self)
             for u in stride(from: 0, to: w, by: step) {
                 let d = row[u]
-                guard d > 0.15, d < 5 else { continue }
-                if let crow = crow, crow[u] < 1 { continue }
-                used += 1
+                // LiDAR is unreliable closer than ~20 cm; 0 / NaN mean no return.
+                guard d.isFinite, d > 0.2, d < 5 else { continue }
                 let pc = simd_float4((Float(u) - cx) * d / fx, -(Float(v) - cy) * d / fyy, -d, 1)
                 let wp = T * pc
-                let height = wp.y - fy
-                let q = P2(Double(wp.x), Double(wp.z))
-                let dx = q.x - pose.p.x, dz = q.z - pose.p.z
-                let lf = dx * cosT - dz * sinT
-                let ll = -dx * sinT - dz * cosT
-                let dist = (lf * lf + ll * ll).squareRoot()
-                if dist < radius + 0.03 { continue }               // the robot's own body
-                if height < 0.04 {
-                    if height > -0.08 { floorPts.append(q); continue }
-                    if !h.floorFound || height > -0.15 { continue }  // a drop (stairs down, a hole): obstacle
-                } else if height > robotH {
-                    continue
-                }
-                hits.append(q)
-                let gap = dist - radius
-                let b = deg(atan2(ll, lf))
-                let idx = Int(((40 - b) / 10).rounded())
-                if idx >= 0, idx < sectors.count, abs(b) <= 45, gap < sectors[idx] {
-                    sectors[idx] = gap
-                    markers[idx] = simd_float3(wp.x, wp.y, wp.z)
-                }
-                if lf > 0, abs(ll) < radius + 0.03 { frontGap = min(frontGap, lf - radius) }
+                pts.append(DepthPoint(x: Double(wp.x), y: Double(wp.y), z: Double(wp.z), conf: crow?[u] ?? 2))
             }
         }
-        grid.integrate(sensor: sensor, hits: hits, floor: floorPts, maxRange: 4.5)
-        h.sectors = sectors.map { max(0, $0) }
-        h.markers = markers
-        h.depthPoints = used
-        h.obstaclePoints = hits.count
-        liveFrontGap = max(0, frontGap)
+        var pcfg = PerceptionConfig()
+        pcfg.robotRadius = cfg.robotRadius
+        pcfg.robotHeight = cfg.robotHeight
+        let r = Perception.classify(pts, pose: pose, floorY: Double(fy), cliffsAllowed: floor.stable(now: now), cfg: pcfg)
+        grid.integrate(sensor: sensor, hits: r.hits, floor: r.floor, maxRange: 4.5)
+        h.sectors = r.sectors
+        h.markers = r.markers.map { m -> SIMD3<Float>? in
+            guard let m = m else { return nil }
+            return SIMD3<Float>(Float(m.x), Float(m.y), Float(m.z))
+        }
+        h.depthPoints = pts.count
+        h.obstaclePoints = r.obstaclePoints
+        h.cliffPoints = r.cliffPoints
+        if cfg.showObstaclePoints {
+            h.debugObstacles = r.debugObstacles.map { simd_float3(Float($0.x), Float($0.y), Float($0.z)) }
+            h.debugCliffs = r.debugCliffs.map { simd_float3(Float($0.x), Float($0.y), Float($0.z)) }
+            h.debugVersion += 1
+        } else if !h.debugObstacles.isEmpty || !h.debugCliffs.isEmpty {
+            h.debugObstacles = []
+            h.debugCliffs = []
+            h.debugVersion += 1
+        }
+        // An obstacle must be in two consecutive sweeps (0.1 s apart) to count.
+        liveFrontGap = max(r.frontGap, prevLiveFrontGap)
+        prevLiveFrontGap = r.frontGap
         liveFrontT = now
-    }
-
-    /// Forward gap from the map: first occupied cell in the robot's corridor, up to 2 m.
-    private func corridorGap(_ p: Pose2) -> Double {
-        let r = cfg.robotRadius
-        let fwd = p.forward
-        let left = P2(-sin(p.theta), -cos(p.theta))
-        var d = r
-        while d < r + 2 {
-            for lat in [-r, -r / 2, 0, r / 2, r] {
-                if grid.isOccupied(p.p + fwd * d + left * lat) { return max(0, d - r) }
-            }
-            d += grid.cell
-        }
-        return .infinity
     }
 
     private func replan(from: P2, to: P2) {
