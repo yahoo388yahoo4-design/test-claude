@@ -14,10 +14,13 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         let device: AVCaptureDevice
         let output: AVCaptureVideoDataOutput
         let port: AVCaptureInput.Port
+        let input: AVCaptureDeviceInput
         var writer: VideoWriter?
         var log: LineWriter?
         var count = 0
-        init(name: String, device: AVCaptureDevice, output: AVCaptureVideoDataOutput, port: AVCaptureInput.Port) {
+        init(name: String, device: AVCaptureDevice, output: AVCaptureVideoDataOutput, port: AVCaptureInput.Port,
+             input: AVCaptureDeviceInput) {
+            self.input = input
             self.name = name
             self.device = device
             self.output = output
@@ -38,6 +41,10 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private(set) var summary = "not configured"
     var previewPort: AVCaptureInput.Port? { streams.first?.port }
     private weak var previewLayer: AVCaptureVideoPreviewLayer?
+    /// Fallback preview when the session can't add a preview connection: the main stream's own frames.
+    private var fallbackLayer: AVSampleBufferDisplayLayer?
+    private(set) var previewKind = "none"
+    private var feedFallback = false   // only touched on `queue`
     /// Live LiDAR depth as a colour image (about 5 per second), for the on-screen inset.
     var onDepthPreview: ((CGImage) -> Void)?
     private var depthPreviewTick = 0
@@ -79,14 +86,91 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         for device in ordered {
             addCamera(device)
         }
+        fitBudget()
         session.commitConfiguration()
         configured = true
         connectPreview()
         let names = streams.map { $0.name } + (depthOutput != nil ? ["lidar_depth"] : [])
         summary = "streams: \(names.joined(separator: ", ")) · hw cost \(String(format: "%.2f", session.hardwareCost))"
-        if session.hardwareCost > 1.0 {
-            summary += " (over budget: drop the front camera)"
+        if !budgetActions.isEmpty { summary += " · " + budgetActions.joined(separator: ", ") }
+    }
+
+    // MARK: hardware budget
+
+    /// What `fitBudget` had to change, also written to session.json.
+    private(set) var budgetActions: [String] = []
+    private(set) var initialHardwareCost: Float = 0
+
+    /// AVCaptureMultiCamSession refuses to run when hardwareCost (sensor bandwidth) or
+    /// systemPressureCost (power/thermal) exceeds 1. Instead of failing, step down in this order:
+    /// smaller formats (<= 1280 wide), then 24 fps, then drop the lowest-priority camera.
+    private func fitBudget() {
+        initialHardwareCost = session.hardwareCost
+        func over() -> Bool { session.hardwareCost > 1.0 || session.systemPressureCost > 1.0 }
+        if over() {
+            for st in streams where st.device.deviceType != .builtInLiDARDepthCamera {
+                setFormat(st.device, maxWidth: 1280)
+            }
+            if !over() { budgetActions.append("reduced to 1280 px"); return }
+            for st in streams { setFormat(st.device, maxWidth: 1280) }
+            if !over() { budgetActions.append("reduced all to 1280 px"); return }
+            for st in streams { setFrameRate(st.device, fps: 24) }
+            budgetActions.append("reduced to 1280 px at 24 fps")
         }
+        while over(), streams.count > 1 {
+            let st = streams.removeLast()   // streams are added in priority order
+            for c in st.output.connections { session.removeConnection(c) }
+            session.removeOutput(st.output)
+            if depthDevice === st.device, let d = depthOutput {
+                session.removeOutput(d)
+                depthOutput = nil
+                depthDevice = nil
+            }
+            session.removeInput(st.input)
+            budgetActions.append("dropped \(st.name)")
+        }
+    }
+
+    private func setFormat(_ device: AVCaptureDevice, maxWidth: Int32) {
+        let isLiDAR = device.deviceType == .builtInLiDARDepthCamera
+        guard let fmt = pickFormat(device, needsDepth: isLiDAR, maxWidth: maxWidth), fmt != device.activeFormat,
+              (try? device.lockForConfiguration()) != nil else { return }
+        let depthFmt = device.activeDepthDataFormat
+        device.activeFormat = fmt
+        if isLiDAR, let old = depthFmt {
+            let w = CMVideoFormatDescriptionGetDimensions(old.formatDescription).width
+            device.activeDepthDataFormat = fmt.supportedDepthDataFormats.first {
+                CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
+                    && CMVideoFormatDescriptionGetDimensions($0.formatDescription).width <= w
+            }
+        }
+        device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+        device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+        device.unlockForConfiguration()
+    }
+
+    private func setFrameRate(_ device: AVCaptureDevice, fps: Int32) {
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: fps)
+        device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: fps)
+        device.unlockForConfiguration()
+    }
+
+    /// Per-device camera budget, written into session.json so different iPhones can be compared.
+    func diagnostics() -> [String: Any] {
+        [
+            "hardware_cost_initial": Double(initialHardwareCost),
+            "hardware_cost": Double(session.hardwareCost),
+            "system_pressure_cost": Double(session.systemPressureCost),
+            "budget_actions": budgetActions,
+            "preview": previewKind,
+            "streams": streams.map { st -> [String: Any] in
+                let d = CMVideoFormatDescriptionGetDimensions(st.device.activeFormat.formatDescription)
+                return ["name": st.name, "device_type": st.device.deviceType.rawValue,
+                        "width": Int(d.width), "height": Int(d.height),
+                        "fps": st.device.activeVideoMinFrameDuration.seconds > 0 ? 1 / st.device.activeVideoMinFrameDuration.seconds : 0]
+            },
+        ]
     }
 
     private func streamName(_ d: AVCaptureDevice) -> String {
@@ -99,12 +183,12 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
 
-    private func pickFormat(_ device: AVCaptureDevice, needsDepth: Bool) -> AVCaptureDevice.Format? {
+    private func pickFormat(_ device: AVCaptureDevice, needsDepth: Bool, maxWidth: Int32 = 1920) -> AVCaptureDevice.Format? {
         let candidates = device.formats.filter { f in
             guard f.isMultiCamSupported else { return false }
             if needsDepth && f.supportedDepthDataFormats.isEmpty { return false }
             let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
-            return d.width <= 1920 && CMFormatDescriptionGetMediaSubType(f.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            return d.width <= maxWidth && CMFormatDescriptionGetMediaSubType(f.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         }
         func dims(_ f: AVCaptureDevice.Format) -> (Int32, Int32) {
             let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
@@ -159,7 +243,7 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         if conn.isVideoStabilizationSupported { conn.preferredVideoStabilizationMode = .off }
         var name = streamName(device)
         if streams.contains(where: { $0.name == name }) { name += "_\(streams.count)" }
-        streams.append(Stream(name: name, device: device, output: out, port: port))
+        streams.append(Stream(name: name, device: device, output: out, port: port, input: input))
 
         if isLiDAR, let dport = input.ports(for: .depthData, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position).first {
             let dout = AVCaptureDepthDataOutput()
@@ -182,21 +266,24 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     /// The preview view can appear before or after `configure`, so whichever comes second makes the
     /// connection from the first (main) camera to the layer.
-    func attachPreview(_ layer: AVCaptureVideoPreviewLayer) {
+    func attachPreview(_ layer: AVCaptureVideoPreviewLayer, fallback: AVSampleBufferDisplayLayer) {
         previewLayer = layer
+        queue.sync { fallbackLayer = fallback }
         connectPreview()
     }
 
     private func connectPreview() {
-        guard let layer = previewLayer, layer.connection == nil, let port = previewPort else { return }
+        guard previewKind == "none", let layer = previewLayer, layer.connection == nil, let port = previewPort else { return }
         if layer.session !== session { layer.setSessionWithNoConnection(session) }
         let conn = AVCaptureConnection(inputPort: port, videoPreviewLayer: layer)
         session.beginConfiguration()
         if session.canAddConnection(conn) {
             session.addConnection(conn)
             if conn.isVideoRotationAngleSupported(90) { conn.videoRotationAngle = 90 }  // app is portrait-only
+            previewKind = "preview_layer"
         } else {
-            summary += " (no preview: over the camera budget)"
+            previewKind = "recorded_stream"   // captureOutput feeds fallbackLayer instead
+            queue.async { self.feedFallback = true }
         }
         session.commitConfiguration()
     }
@@ -265,6 +352,16 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     // MARK: delegates (on `queue`)
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        if feedFallback, output === streams.first?.output, let layer = fallbackLayer {
+            if let atts = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true),
+               CFArrayGetCount(atts) > 0 {
+                let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
+                CFDictionarySetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                     Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+            }
+            if layer.sampleBufferRenderer.status == .failed { layer.sampleBufferRenderer.flush() }
+            layer.sampleBufferRenderer.enqueue(sampleBuffer)
+        }
         guard recording, let cams = camsDir, let s = streams.first(where: { $0.output === output }),
               let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let w = CVPixelBufferGetWidth(pb)

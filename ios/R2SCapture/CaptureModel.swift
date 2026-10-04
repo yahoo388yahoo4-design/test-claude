@@ -195,6 +195,7 @@ final class CaptureModel: ObservableObject {
                 if settings.mode == .arkitRoomPlan { obj["roomplan_objects"] = room.objectCount }
             case .multiCam:
                 obj["cams"] = multicam.frameCounts()
+                obj["multicam"] = multicam.diagnostics()
                 obj["counts"] = ["imu": sensors.imuCount, "location": sensors.locationCount]
                 obj["notes"] = "Mode C: no ARKit poses; run tools/recover_poses.py"
             }

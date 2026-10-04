@@ -126,18 +126,36 @@ struct RoomPreview: UIViewRepresentable {
 final class PreviewHostView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    /// Used when the capture session has no room for a preview connection (see MultiCamRecorder).
+    let fallbackLayer = AVSampleBufferDisplayLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        fallbackLayer.videoGravity = .resizeAspectFill
+        layer.addSublayer(fallbackLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Sensor frames are landscape; rotate the fallback layer to the portrait UI.
+        fallbackLayer.bounds = CGRect(x: 0, y: 0, width: bounds.height, height: bounds.width)
+        fallbackLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        fallbackLayer.setAffineTransform(CGAffineTransform(rotationAngle: .pi / 2))
+    }
 }
 
 struct MultiCamPreview: UIViewRepresentable {
     let recorder: MultiCamRecorder
     func makeUIView(context: Context) -> PreviewHostView {
-        let v = PreviewHostView()
+        let v = PreviewHostView(frame: .zero)
         v.previewLayer.videoGravity = .resizeAspectFill
-        recorder.attachPreview(v.previewLayer)
+        recorder.attachPreview(v.previewLayer, fallback: v.fallbackLayer)
         return v
     }
     func updateUIView(_ uiView: PreviewHostView, context: Context) {
-        recorder.attachPreview(uiView.previewLayer)
+        recorder.attachPreview(uiView.previewLayer, fallback: uiView.fallbackLayer)
     }
 }
 
