@@ -129,7 +129,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 1 -> {
                     val r = Camera2Recorder(this, w, Camera2Options(rawDng = cb(R.id.cbRaw), lock = cb(R.id.cbLock), oisOff = cb(R.id.cbOisOff)), ::status)
-                    r.start()?.let { err -> status(err); abort(); return }
+                    // live preview behind the coverage overlay (its surface must exist before the session is configured)
+                    previewHost.addView(r.previewView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, android.view.Gravity.CENTER))
+                    val err = try { r.start() } catch (e: Exception) { "camera start failed: $e" }
+                    if (err != null) { previewHost.removeView(r.previewView); status(err); abort(); return }
                     cam2 = r
                     val cv = CoverageView(this)
                     previewHost.addView(cv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply { topMargin = dp(150); bottomMargin = dp(130) })
@@ -161,7 +164,7 @@ class MainActivity : AppCompatActivity() {
         hud?.let { previewHost.removeView(it) }; hud = null
         coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
         ar?.let { it.stop(); previewHost.removeView(it.view) }; ar = null
-        cam2?.stop(); cam2 = null
+        cam2?.let { it.stop(); previewHost.removeView(it.previewView) }; cam2 = null
         val sum = sensors?.summary() ?: ""
         sensors?.stop(); sensors = null
         w.finish()

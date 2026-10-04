@@ -48,5 +48,6 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")   // real org.json (the android.jar one is a stub in JVM tests)
+    // real org.json for JVM tests (android.jar only has stubs)
+    testImplementation("org.json:json:20260814")
 }

@@ -20,24 +20,24 @@ object CameraInfo {
     fun toJson(v: Any?): Any? = when (v) {
         null -> JSONObject.NULL
         is Boolean, is Int, is Long, is String -> v
-        is Float -> v.toDouble()
-        is Double -> v
+        is Float -> JsonSafe.num(v)
+        is Double -> JsonSafe.num(v)
         is Size -> JSONArray(listOf(v.width, v.height))
-        is SizeF -> JSONArray(listOf(v.width.toDouble(), v.height.toDouble()))
-        is Rational -> v.toDouble()
+        is SizeF -> JSONArray(listOf(JsonSafe.num(v.width), JsonSafe.num(v.height)))
+        is Rational -> JsonSafe.num(v.toDouble())
         is Range<*> -> JSONArray(listOf(toJson(v.lower), toJson(v.upper)))
         is android.graphics.Rect -> JSONArray(listOf(v.left, v.top, v.right, v.bottom))
         is IntArray -> JSONArray(v.toList())
         is LongArray -> JSONArray(v.toList())
-        is FloatArray -> JSONArray(v.map { it.toDouble() })
-        is DoubleArray -> JSONArray(v.toList())
+        is FloatArray -> JSONArray(v.map { JsonSafe.num(it) })
+        is DoubleArray -> JSONArray(v.map { JsonSafe.num(it) })
         is BooleanArray -> JSONArray(v.toList())
         is ByteArray -> JSONArray(v.map { it.toInt() })
         is Array<*> -> JSONArray(v.map { toJson(it) })
         is StreamConfigurationMap -> streamMap(v)
         is android.hardware.camera2.params.BlackLevelPattern -> JSONArray((0..3).map { v.getOffsetForIndex(it % 2, it / 2) })
-        is android.hardware.camera2.params.ColorSpaceTransform -> JSONArray((0..8).map { v.getElement(it % 3, it / 3).toDouble() })
-        is android.hardware.camera2.params.OisSample -> JSONArray(listOf(v.timestamp, v.xshift.toDouble(), v.yshift.toDouble()))
+        is android.hardware.camera2.params.ColorSpaceTransform -> JSONArray((0..8).map { JsonSafe.num(v.getElement(it % 3, it / 3).toDouble()) })
+        is android.hardware.camera2.params.OisSample -> JSONArray(listOf(v.timestamp, JsonSafe.num(v.xshift), JsonSafe.num(v.yshift)))
         is android.hardware.camera2.params.LensShadingMap -> JSONObject().apply { put("rows", v.rowCount); put("cols", v.columnCount) }
         else -> v.toString()
     }
@@ -121,7 +121,7 @@ object CameraInfo {
 
     /** The per-frame CaptureResult fields that matter for reconstruction (compact, for frames.jsonl). */
     fun resultFields(r: CaptureResult, o: JSONObject) {
-        fun <T> put(name: String, k: CaptureResult.Key<T>) { r.get(k)?.let { o.put(name, toJson(it)) } }
+        fun <T> put(name: String, k: CaptureResult.Key<T>) { try { r.get(k)?.let { JsonSafe.put(o, name, toJson(it)) } } catch (_: Exception) {} }
         put("exposure_ns", CaptureResult.SENSOR_EXPOSURE_TIME)
         put("iso", CaptureResult.SENSOR_SENSITIVITY)
         put("frame_duration_ns", CaptureResult.SENSOR_FRAME_DURATION)
