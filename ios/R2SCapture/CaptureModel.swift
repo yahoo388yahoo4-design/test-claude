@@ -15,6 +15,9 @@ final class CaptureModel: ObservableObject {
     @Published var statsLine = ""
     @Published var sessions: [URL] = []
     @Published var uploadStatus = ""
+    @Published var depthPreview: CGImage?
+    /// Bumped at each recording start so the coverage overlay starts empty.
+    @Published private(set) var recordingIndex = 0
 
     let ar = ARRecorder()
     let room = RoomPlanRecorder()
@@ -29,6 +32,7 @@ final class CaptureModel: ObservableObject {
 
     init() {
         refreshSessions()
+        multicam.onDepthPreview = { [weak self] img in self?.depthPreview = img }
     }
 
     var lidarAvailable: Bool { ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) }
@@ -108,6 +112,7 @@ final class CaptureModel: ObservableObject {
                 try multicam.startRecording(dir: dir)
             }
             UIApplication.shared.isIdleTimerDisabled = true
+            recordingIndex += 1
             isRecording = true
             status = "Recording \(dir.lastPathComponent)"
         } catch {

@@ -38,6 +38,9 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private(set) var summary = "not configured"
     var previewPort: AVCaptureInput.Port? { streams.first?.port }
     private weak var previewLayer: AVCaptureVideoPreviewLayer?
+    /// Live LiDAR depth as a colour image (about 5 per second), for the on-screen inset.
+    var onDepthPreview: ((CGImage) -> Void)?
+    private var depthPreviewTick = 0
     var bitrate = 30_000_000
 
     static var isSupported: Bool { AVCaptureMultiCamSession.isMultiCamSupported }
@@ -286,9 +289,13 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     func depthDataOutput(_ output: AVCaptureDepthDataOutput, didOutput depthData: AVDepthData, timestamp: CMTime,
                          connection: AVCaptureConnection) {
-        guard recording, let blob = depthBlob else { return }
         let depth = depthData.depthDataType == kCVPixelFormatType_DepthFloat32 ? depthData
             : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+        depthPreviewTick += 1
+        if depthPreviewTick % 6 == 0, let cb = onDepthPreview, let img = DepthColor.image(depth.depthDataMap) {
+            DispatchQueue.main.async { cb(img) }
+        }
+        guard recording, let blob = depthBlob else { return }
         let map = depth.depthDataMap
         let range = blob.append(raw: DepthConvert.millimetres(map))
         var rec: [String: Any] = ["i": depthCount, "t": hostSeconds(timestamp),
@@ -358,5 +365,35 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                            "field_of_view_deg": Double(a.device.activeFormat.videoFieldOfView)]
         }
         SessionStorage.writeJSON(out, to: url)
+    }
+}
+
+/// Float32 depth map -> turbo-like colour image (near = red, far = blue, invalid = black).
+enum DepthColor {
+    static func image(_ map: CVPixelBuffer, maxDepth: Float = 5) -> CGImage? {
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        let w = CVPixelBufferGetWidth(map), h = CVPixelBufferGetHeight(map)
+        guard CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32,
+              let base = CVPixelBufferGetBaseAddress(map) else { return nil }
+        let stride = CVPixelBufferGetBytesPerRow(map)
+        var rgba = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h {
+            let row = (base + y * stride).assumingMemoryBound(to: Float32.self)
+            for x in 0..<w {
+                let d = row[x]
+                let i = (y * w + x) * 4
+                guard d.isFinite, d > 0 else { rgba[i] = 0; rgba[i + 1] = 0; rgba[i + 2] = 0; continue }
+                let t = min(d / maxDepth, 1)
+                rgba[i] = UInt8(255 * min(max(1.5 - abs(4 * t - 1), 0), 1))
+                rgba[i + 1] = UInt8(255 * min(max(1.5 - abs(4 * t - 2), 0), 1))
+                rgba[i + 2] = UInt8(255 * min(max(1.5 - abs(4 * t - 3), 0), 1))
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                       space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 }

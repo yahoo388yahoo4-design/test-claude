@@ -67,11 +67,33 @@ struct ContentView: View {
     @ViewBuilder private var preview: some View {
         switch model.settings.mode {
         case .arkitRGBD:
-            ARPreview(session: model.ar.session)
+            ZStack {
+                ARPreview(session: model.ar.session)
+                CoverageOverlay(session: model.ar.session, resetToken: model.recordingIndex)
+            }
         case .arkitRoomPlan:
-            RoomPreview(recorder: model.room, session: model.ar.session)
+            ZStack {
+                RoomPreview(recorder: model.room, session: model.ar.session)
+                CoverageOverlay(session: model.ar.session, resetToken: model.recordingIndex)
+            }
         case .multiCam:
-            MultiCamPreview(recorder: model.multicam)
+            ZStack(alignment: .topTrailing) {
+                MultiCamPreview(recorder: model.multicam)
+                if let img = model.depthPreview {
+                    // AVFoundation depth is in sensor (landscape) orientation; the app is portrait.
+                    Image(uiImage: UIImage(cgImage: img, scale: 1, orientation: .right))
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(alignment: .bottom) {
+                            Text("LiDAR depth").font(.caption2).padding(2)
+                        }
+                        .padding(.top, 140)
+                        .padding(.trailing, 12)
+                        .allowsHitTesting(false)
+                }
+            }
         }
     }
 }
