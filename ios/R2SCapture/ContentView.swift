@@ -8,6 +8,7 @@ struct ContentView: View {
     @EnvironmentObject var model: CaptureModel
     @State private var showSettings = false
     @State private var showSessions = false
+    @State private var showNav = false
 
     var body: some View {
         ZStack {
@@ -50,6 +51,17 @@ struct ContentView: View {
                         Image(systemName: "gearshape").font(.title2)
                     }
                     .disabled(model.isRecording)
+                    // Navigation mode (Nav/): SLAM, obstacle avoidance and robot driving, full screen.
+                    Button {
+                        model.stopPreview()
+                        showNav = true
+                    } label: {
+                        VStack(spacing: 2) {
+                            Image(systemName: "location.north.line").font(.title2)
+                            Text("Nav").font(.caption2)
+                        }
+                    }
+                    .disabled(model.isRecording || model.isFinishing)
                 }
                 .foregroundStyle(.white)
                 .padding(.bottom, 20)
@@ -58,6 +70,9 @@ struct ContentView: View {
         .onAppear { model.activate() }
         .sheet(isPresented: $showSettings, onDismiss: { model.modeChanged() }) {
             SettingsView().environmentObject(model)
+        }
+        .fullScreenCover(isPresented: $showNav, onDismiss: { model.startPreview(); model.refreshSessions() }) {
+            NavModeView()
         }
         .sheet(isPresented: $showSessions) {
             SessionsView().environmentObject(model)
