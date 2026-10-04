@@ -30,7 +30,8 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         ITSAppUsesNonExemptEncryption: false
         NSCameraUsageDescription: "Records RGB video, LiDAR depth and camera poses for 3D datasets."
-        NSMicrophoneUsageDescription: "Optionally records an audio track with the capture video."
+        NSMicrophoneUsageDescription: "Optionally records an audio track with the capture video, and listens for voice commands in navigation mode."
+        NSSpeechRecognitionUsageDescription: "Turns your voice commands into text in navigation mode (on the iPhone when possible)."
         NSMotionUsageDescription: "Records accelerometer, gyroscope, magnetometer and barometer data with each capture."
         NSLocationWhenInUseUsageDescription: "Optionally records GPS position and heading with each capture."
         NSLocalNetworkUsageDescription: "Uploads finished captures to your computer and talks to your robot's motor controller over Wi-Fi."

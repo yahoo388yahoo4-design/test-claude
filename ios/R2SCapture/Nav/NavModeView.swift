@@ -7,6 +7,7 @@ import UIKit
 /// HUD (instruction, speed, distances, LiDAR depth, radar, minimap), drive controls and settings.
 struct NavModeView: View {
     @StateObject private var engine = NavEngine()
+    @StateObject private var voice = VoiceAssistant()
     @Environment(\.dismiss) private var dismiss
     @State private var showSettings = false
     @State private var showManual = true
@@ -35,12 +36,13 @@ struct NavModeView: View {
                         .background(.ultraThinMaterial, in: Capsule())
                         .onTapGesture { engine.toast = "" }
                 }
+                VoiceOverlay(voice: voice)
                 BottomPanel(engine: engine, showManual: $showManual)
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear { engine.start() }
-        .onDisappear { engine.shutdown() }
+        .onAppear { engine.start(); voice.attach(engine) }
+        .onDisappear { voice.cancel(); engine.shutdown() }
         .sheet(isPresented: $showSettings) {
             NavSettingsView(engine: engine)
         }

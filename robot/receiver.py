@@ -7,11 +7,15 @@ differential-drive wheel speeds. Pick a motor backend:
   sim     no hardware: integrates the motion and prints it (default; good for testing the app)
   serial  sends "M <left> <right>\\n" (-1000..1000) to a microcontroller, e.g. robot/serial_motor.ino
   gpio    Raspberry Pi + an H-bridge (L298N / TB6612 / DRV8833) through gpiozero
+  neato   Neato XV / Botvac vacuum over its USB port ("setmotor"; robot/usb_robots.py)
+  openbot OpenBot body (Arduino firmware) over USB serial ("c<l>,<r>"; robot/usb_robots.py)
 
   pip install websockets            (and gpiozero / pyserial for those backends)
   python3 robot/receiver.py --backend sim
   python3 robot/receiver.py --backend serial --serial /dev/ttyUSB0 --wheel-base 0.30 --max-wheel 0.5
   python3 robot/receiver.py --backend gpio --gpio-left 17 27 12 --gpio-right 23 24 13
+  python3 robot/receiver.py --backend neato                 # /dev/ttyACM0
+  python3 robot/receiver.py --backend openbot --serial /dev/ttyUSB0
 
 Then set the app's Navigation settings > Robot link > Wi-Fi to ws://<this computer's IP>:8777/robot.
 
@@ -31,6 +35,8 @@ try:
     import websockets
 except ImportError:  # pragma: no cover
     sys.exit("pip install websockets")
+
+import usb_robots  # noqa: E402  (same folder)
 
 PROTO = 1
 
@@ -138,6 +144,7 @@ class Robot:
         self.job_seq = None
         self.v = self.w = 0.0
         self.estop = False
+        self.events = []         # robot -> phone messages raised outside a request (bumper e-stop)
 
     def wheels(self, v, w):
         """Body velocity (m/s, rad/s, + = left) -> wheel speeds, scaled down together if one saturates."""
@@ -222,10 +229,17 @@ class Robot:
                 self.drive(0, 0)
 
     def status(self):
+        extra = self.m.status()
+        if extra.pop("bumped", False) and not self.estop:
+            # A bumper hit latches the e-stop like the phone's estop message; the phone releases it.
+            self.estop = True
+            self.cancel_job()
+            self.drive(0, 0)
+            self.events.append({"type": "estop", "reason": "bumper"})
         s = {"type": "status", "v": round(self.v, 3), "w": round(self.w, 3),
              "left": round(self.m.left, 3), "right": round(self.m.right, 3),
              "busy": self.job is not None and not self.job.done(), "estop": self.estop}
-        s.update(self.m.status())
+        s.update(extra)
         return s
 
 
@@ -244,7 +258,8 @@ def local_ips():
 
 
 async def main(args):
-    backends = {"sim": SimMotors, "serial": SerialMotors, "gpio": GpioMotors}
+    backends = {"sim": SimMotors, "serial": SerialMotors, "gpio": GpioMotors,
+                "neato": usb_robots.NeatoMotors, "openbot": usb_robots.OpenBotMotors}
     robot = Robot(backends[args.backend](args), args)
     clients = set()
 
@@ -281,12 +296,14 @@ async def main(args):
         while True:
             await asyncio.sleep(1.0 / args.status_hz)
             if clients:
-                msg = json.dumps(robot.status())
+                msgs = [json.dumps(robot.status())] + [json.dumps(e) for e in robot.events]
+                robot.events.clear()
                 for c in list(clients):
-                    try:
-                        await c.send(msg)
-                    except Exception:
-                        pass
+                    for msg in msgs:
+                        try:
+                            await c.send(msg)
+                        except Exception:
+                            pass
             if args.backend == "sim" and args.verbose and (robot.v or robot.w):
                 print("sim:", robot.status())
 
@@ -298,24 +315,31 @@ async def main(args):
 
 def parse(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--backend", choices=["sim", "serial", "gpio"], default="sim")
+    p.add_argument("--backend", choices=["sim", "serial", "gpio", "neato", "openbot"], default="sim")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8777)
-    p.add_argument("--name", default="R2S diff-drive")
-    p.add_argument("--wheel-base", type=float, default=0.30, help="distance between the wheels, m")
-    p.add_argument("--max-wheel", type=float, default=0.50, help="wheel speed at full power, m/s")
+    p.add_argument("--name", default=None, help="robot name sent in hello (default: per backend)")
+    p.add_argument("--wheel-base", type=float, default=None, help="distance between the wheels, m (0.30; Neato 0.248)")
+    p.add_argument("--max-wheel", type=float, default=None, help="wheel speed at full power, m/s (0.50; Neato 0.30)")
     p.add_argument("--max-speed", type=float, default=0.50, help="cap on commanded forward speed, m/s")
     p.add_argument("--watchdog", type=float, default=0.5, help="stop if no vel for this long, s")
     p.add_argument("--status-hz", type=float, default=2.0)
     p.add_argument("--ack", action="store_true", help="answer every motion command with an ack")
-    p.add_argument("--serial", default="/dev/ttyUSB0")
+    p.add_argument("--serial", default=None, help="serial port (/dev/ttyUSB0; Neato /dev/ttyACM0)")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--gpio-left", type=int, nargs=3, default=[17, 27, 12], metavar=("FWD", "BACK", "PWM"))
     p.add_argument("--gpio-right", type=int, nargs=3, default=[23, 24, 13], metavar=("FWD", "BACK", "PWM"))
     p.add_argument("--invert-left", action="store_true")
     p.add_argument("--invert-right", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
-    return p.parse_args(argv)
+    usb_robots.add_args(p)
+    a = p.parse_args(argv)
+    defaults = {"serial": "/dev/ttyUSB0", "wheel_base": 0.30, "max_wheel": 0.50, "name": "R2S diff-drive"}
+    defaults.update(usb_robots.DEFAULTS.get(a.backend, {}))
+    for k, v in defaults.items():
+        if getattr(a, k) is None:
+            setattr(a, k, v)
+    return a
 
 
 if __name__ == "__main__":
