@@ -33,7 +33,8 @@ targets:
         NSMicrophoneUsageDescription: "Optionally records an audio track with the capture video."
         NSMotionUsageDescription: "Records accelerometer, gyroscope, magnetometer and barometer data with each capture."
         NSLocationWhenInUseUsageDescription: "Optionally records GPS position and heading with each capture."
-        NSLocalNetworkUsageDescription: "Uploads finished captures to your computer over Wi-Fi."
+        NSLocalNetworkUsageDescription: "Uploads finished captures to your computer and talks to your robot's motor controller over Wi-Fi."
+        NSBluetoothAlwaysUsageDescription: "Connects to your robot's motor controller over Bluetooth LE in navigation mode."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
