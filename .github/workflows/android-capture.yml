@@ -1,0 +1,76 @@
+# Builds the Android capture app (debug APK) and uploads it as a workflow artifact.
+# Repo layout assumed: android/ (this app), tools/ (shared converter), ios/ (not touched).
+name: android-capture
+
+on:
+  push:
+    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
+  pull_request:
+    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;36.0.0 platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+      - name: Build debug APK + lint + unit tests
+        run: |
+          # the wrapper jar is binary; regenerate it if the checkout does not carry it
+          test -f gradle/wrapper/gradle-wrapper.jar || gradle wrapper --gradle-version 8.14.3
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug lintDebug testDebugUnitTest
+      - name: Checksum
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk real2sim-capture-debug.apk
+          sha256sum real2sim-capture-debug.apk | tee real2sim-capture-debug.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real2sim-capture-debug-apk
+          path: |
+            android/real2sim-capture-debug.apk
+            android/real2sim-capture-debug.apk.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-report
+          path: android/app/build/reports/lint-results-debug.*
+
+  robot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Robot receiver end-to-end test (sim backend; same receiver the iPhone app uses)
+        run: |
+          pip install websockets
+          python robot/test_receiver.py
+
+  reader:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Android reader imports and registers
+        # The shared converter (tools/readers/__init__.py) comes from the iOS branch; skip until it is merged.
+        if: hashFiles('tools/readers/__init__.py') != ''
+        run: |
+          pip install numpy opencv-python-headless scipy pillow
+          cd tools && python -c "import readers; assert 'android' in readers.READERS, readers.READERS; print('android reader registered')"
