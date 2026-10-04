@@ -84,6 +84,44 @@ Options (checkboxes):
   Otherwise it is skipped. It records the Earth/VPS camera pose (lat/lon/alt/heading quaternion and
   accuracies) per frame.
 
+### Live view while recording
+
+* **Mode A** draws what has been captured so far on top of the camera image: a 3D point cloud of the
+  ARCore depth (coloured by height above the floor), a top-down occupancy map with your path
+  (top right), and a HUD with frames, depth, points, mapped area, distance walked, speed and a
+  72-beam virtual lidar of the nearest surfaces. Long-press the map to hide or show the 3D points.
+  The map is saved with the session (`extras/map/`) and under `maps/` for navigation mode.
+* **Mode B** has no ARCore, so it shows a coverage panorama instead: a yaw × pitch grid filled in by
+  how long the phone pointed each way (from the game rotation vector), plus live per-lens frame,
+  RAW, ToF and capture-result counts.
+
+### Navigation mode (phone on a robot)
+
+The **Navigate** button opens a separate screen for driving a two-wheeled robot with the phone as its
+only sensor. The receiver that runs on the robot and the shared protocol (same as the iPhone app)
+are in [`robot/`](../robot/README.md).
+
+1. **Map.** Walk or drive around; ARCore depth builds a 5 cm occupancy grid and a point cloud. Or press
+   **Load map** to bring back a map saved by mode A or by an earlier navigation run, then **Align**
+   (scan matching of the live map against the saved one) or **Same start** (you started where the
+   saved map started).
+2. **Goal.** Tap the top-down map, or tap the floor in the camera view. A* plans a path that keeps the
+   robot radius (default 20 cm) away from obstacles and replans every 0.5 s as the map changes.
+3. **Guidance.** The path and goal are drawn in 3D and on the map; a big arrow and text give the next
+   instruction ("turn left 40 degrees", "go straight 1.2 metres"), spoken aloud (Voice) with parking
+   style beeps as obstacles get closer than 1.2 m (Beeps).
+4. **Drive.** Connect to the robot (`192.168.1.20`, or `192.168.1.20?token=abc`) and switch on
+   **Auto-drive**: the phone sends `vel` commands at 10 Hz (pure pursuit), slows near obstacles,
+   stops when something is within 15 cm of the robot's front or ARCore tracking is lost, and says
+   "Goal reached". **STOP** latches an e-stop on the robot until **Reset e-stop**.
+5. **Manual commands.** "Move X cm at V cm/s" and "Turn A° at W°/s", with the phone measuring how far
+   it actually moved and turned.
+
+The HUD shows phone and robot speed on a dial, distances front / left / right with bars, the polar
+virtual lidar, robot link state, round-trip time and battery, map size and tracking state.
+Settings: phone mount height, robot radius, obstacle height, max speed. Each run logs
+`nav/<time>/nav.jsonl` (pose, command, distances at 5 Hz).
+
 ## 3. Capture tips (13 Ultra)
 
 * **Mode A first.** It is the only mode with on-device poses and depth, and the converter turns it
@@ -234,5 +272,10 @@ sparser than LiDAR), real MediaCodec output, and device timing.
   vertical and horizontal planes as seeds) → room.usdz via the existing `build_arkit_scan` tooling on
   fleet-3090. That is not automated yet, and ARKitScenes `3dod_annotation.json` (object boxes) is
   equally absent.
+* **Navigation runs on motion-estimated depth.** Without LiDAR, ARCore depth needs the phone to
+  move, is sparse on blank walls and glass, and misses thin chair legs and cables; obstacles lower
+  than about 6 cm above the floor are ignored on purpose (floor noise). Keep max speed low (≤25 cm/s)
+  and stay near the robot with the STOP button. There is no relocalisation against a saved map other
+  than **Align** / **Same start**, and the map lives in one ARCore session's frame.
 * Mode A's hi-res stills, Geospatial, ToF and multi-lens streaming depend on HAL behaviour that has
   only been compiled against, not exercised on the device.

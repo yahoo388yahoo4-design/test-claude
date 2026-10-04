@@ -84,6 +84,8 @@
                 android:layout_height="wrap_content" android:text="Dump cams" />
             <Button android:id="@+id/btnUpload" android:layout_width="0dp" android:layout_weight="1"
                 android:layout_height="wrap_content" android:text="Upload last" />
+            <Button android:id="@+id/btnNav" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Navigate" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

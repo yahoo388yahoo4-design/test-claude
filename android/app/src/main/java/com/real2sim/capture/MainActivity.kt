@@ -34,6 +34,12 @@ class MainActivity : AppCompatActivity() {
     private var lastSession: File? = null
     private var wake: PowerManager.WakeLock? = null
     private var arInstallRequested = false
+    private var mapView: MapView? = null
+    private var hud: HudView? = null
+    private var coverage: CoverageView? = null
+    private val ui = android.os.Handler(android.os.Looper.getMainLooper())
+    private val bgExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile private var liveBusy = false
 
     private val modes = listOf("A: ARCore RGB-D + poses", "B: Camera2 multi-cam + RAW (no poses)", "Sensors only (IMU/GNSS)")
 
@@ -51,6 +57,10 @@ class MainActivity : AppCompatActivity() {
 
         btnRecord.setOnClickListener { if (writer == null) startRecording() else stopRecording() }
         findViewById<Button>(R.id.btnCams).setOnClickListener { dumpCameras() }
+        findViewById<Button>(R.id.btnNav).setOnClickListener {
+            if (writer != null) { status("stop recording first"); return@setOnClickListener }
+            startActivity(android.content.Intent(this, NavActivity::class.java))
+        }
         findViewById<Button>(R.id.btnUpload).setOnClickListener {
             val base = url.text.toString()
             prefs.edit().putString("upload_url", base).apply()
@@ -115,11 +125,17 @@ class MainActivity : AppCompatActivity() {
                     previewHost.addView(r.view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                     r.start()
                     ar = r
+                    addLiveViews(r)
                 }
                 1 -> {
                     val r = Camera2Recorder(this, w, Camera2Options(rawDng = cb(R.id.cbRaw), lock = cb(R.id.cbLock), oisOff = cb(R.id.cbOisOff)), ::status)
                     r.start()?.let { err -> status(err); abort(); return }
                     cam2 = r
+                    val cv = CoverageView(this)
+                    previewHost.addView(cv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply { topMargin = dp(150); bottomMargin = dp(130) })
+                    cv.recording = true; cv.start()
+                    coverage = cv
+                    ui.postDelayed(liveTick, 500)
                 }
             }
         } catch (e: Exception) {
@@ -140,6 +156,10 @@ class MainActivity : AppCompatActivity() {
         val w = writer ?: return
         btnRecord.isEnabled = false
         status("stopping…")
+        ui.removeCallbacks(liveTick)
+        mapView?.let { previewHost.removeView(it) }; mapView = null
+        hud?.let { previewHost.removeView(it) }; hud = null
+        coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
         ar?.let { it.stop(); previewHost.removeView(it.view) }; ar = null
         cam2?.stop(); cam2 = null
         val sum = sensors?.summary() ?: ""
@@ -150,6 +170,44 @@ class MainActivity : AppCompatActivity() {
         wake?.let { if (it.isHeld) it.release() }; wake = null
         btnRecord.text = "Record"; btnRecord.isEnabled = true; modeSpinner.isEnabled = true
         status("saved ${w.dir.name}\n$sum")
+    }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    /** Mode A live view: 3D points are drawn by ArRecorder; here the top-down map and the stats HUD. */
+    private fun addLiveViews(r: ArRecorder) {
+        val h = HudView(this)
+        previewHost.addView(h, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply { topMargin = dp(150) })
+        val mv = MapView(this).apply { title = "captured so far (long-press: 3D points on/off)" }
+        val side = (resources.displayMetrics.widthPixels * 0.42f).toInt()
+        previewHost.addView(mv, FrameLayout.LayoutParams(side, side).apply {
+            gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = dp(160); rightMargin = dp(8) })
+        mv.setOnLongClickListener { r.showCloud = !r.showCloud; true }
+        hud = h; mapView = mv
+        ui.postDelayed(liveTick, 500)
+    }
+
+    private val liveTick = object : Runnable {
+        override fun run() {
+            cam2?.let { c -> coverage?.status = c.liveStatus() }
+            val r = ar; val mv = mapView; val h = hud
+            if (r != null && mv != null && h != null && !liveBusy) {
+                liveBusy = true
+                bgExec.execute {
+                    try {
+                        val bm = r.map.bitmap()
+                        val t = synchronized(r.map) { ArrayList(r.map.traj) }
+                        val st = HudView.State().apply { lines = r.liveStats() }
+                        runOnUiThread {
+                            mv.setMap(bm?.first, bm?.second)
+                            t.lastOrNull()?.let { p -> mv.setPose(p[0], p[2], r.heading(), t) }
+                            h.state = st
+                        }
+                    } finally { liveBusy = false }
+                }
+            }
+            if (ar != null || cam2 != null) ui.postDelayed(this, 700)
+        }
     }
 
     private fun latestSession(): File? =

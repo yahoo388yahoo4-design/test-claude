@@ -377,6 +377,11 @@ class Camera2Recorder(
         return JSONArray(listOf(k[0] * sx, k[1] * sx, (k[2] - 0) * sx, (k[3] - oy) * sx))
     }
 
+    /** Per-lens progress for the live coverage view. */
+    fun liveStatus(): String =
+        streams.joinToString("\n") { st -> "${st.name} ${st.size.width}x${st.size.height}: ${st.encoder.encoded} frames" } +
+            "\nRAW DNG $rawCount   ToF depth $depthCount   capture results $frames"
+
     // ------------------------------------------------------------------ stop
     fun stop() {
         running = false
