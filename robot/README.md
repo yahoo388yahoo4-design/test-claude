@@ -1,32 +1,19 @@
-# Robot receiver
+# Robot side of R2S Capture's navigation mode
 
-Put a phone running the capture app's navigation mode on a two-wheeled robot and let it drive.
-The phone does the mapping, localisation, path planning and obstacle checks; the robot only has to
-follow `move` / `turn` / `vel` commands ([PROTOCOL.md](PROTOCOL.md)).
+| File | What |
+|---|---|
+| [PROTOCOL.md](PROTOCOL.md) | the JSON messages between the phone and the robot (Wi-Fi WebSocket or BLE UART) |
+| [receiver.py](receiver.py) | Python receiver for a Linux computer on the robot: `sim`, `serial` and Raspberry Pi `gpio` backends |
+| [test_receiver.py](test_receiver.py) | end-to-end test of `receiver.py` (sim backend) speaking the app's protocol |
+| [esp32_diffdrive/](esp32_diffdrive/esp32_diffdrive.ino) | ESP32 firmware: Wi-Fi access point + WebSocket + BLE UART, TB6612 / L298N / DRV8833 |
+| [serial_motor/](serial_motor/serial_motor.ino) | Arduino motor bridge for `receiver.py --backend serial` |
 
+Fastest check without hardware:
+
+```bash
+pip install websockets
+python3 robot/receiver.py --backend sim -v      # prints ws://<ip>:8777/robot
 ```
-pip install websockets pyserial
-python receiver.py --backend sim                      # no hardware, prints what it would do
-python receiver.py --backend serial --serial-port /dev/ttyUSB0 --wheel-base 18 --ticks-per-cm 20 --max-speed 30
-```
 
-On the phone: Navigate → robot field `192.168.1.20` (port 8766 and `/r2s` are added) → Connect.
-With `--token abc` on the receiver, type `192.168.1.20?token=abc`.
-
-## Hardware
-
-* Any computer on the robot that runs Python 3.9+ (Raspberry Pi, Jetson, old laptop) on the same Wi-Fi as the phone.
-* A motor board on USB serial running [arduino/r2s_diffdrive](arduino/r2s_diffdrive/r2s_diffdrive.ino):
-  it receives `V <left_cms> <right_cms>` and replies `E <left_ticks> <right_ticks>` (encoders, optional) and
-  `B <volts>` (battery, optional). Without encoders the odometry is open loop; the phone's own tracking
-  still closes the loop for navigation.
-* Mount the phone level, camera facing forward, and enter its height in the app (`mount`).
-
-## Tests
-
-```
-pip install websockets pytest
-python -m pytest -q robot/test_receiver.py
-```
-The tests connect over a real WebSocket to the sim backend: hello/ping, move forward and back,
-left turn sign, `vel` clamp and watchdog, e-stop latch, hello/token enforcement.
+Put that URL in the app (Nav › gear › Robot link › Wi-Fi), tap Connect, and drive with the Manual
+joystick; the receiver prints the simulated pose. Usage of the app side: [../NAVIGATION.md](../NAVIGATION.md).

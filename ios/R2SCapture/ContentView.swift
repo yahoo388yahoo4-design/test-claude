@@ -8,6 +8,7 @@ struct ContentView: View {
     @EnvironmentObject var model: CaptureModel
     @State private var showSettings = false
     @State private var showSessions = false
+    @State private var showNav = false
 
     var body: some View {
         ZStack {
@@ -50,6 +51,17 @@ struct ContentView: View {
                         Image(systemName: "gearshape").font(.title2)
                     }
                     .disabled(model.isRecording)
+                    // Navigation mode (Nav/): SLAM, obstacle avoidance and robot driving, full screen.
+                    Button {
+                        model.stopPreview()
+                        showNav = true
+                    } label: {
+                        VStack(spacing: 2) {
+                            Image(systemName: "location.north.line").font(.title2)
+                            Text("Nav").font(.caption2)
+                        }
+                    }
+                    .disabled(model.isRecording || model.isFinishing)
                 }
                 .foregroundStyle(.white)
                 .padding(.bottom, 20)
@@ -59,6 +71,9 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings, onDismiss: { model.modeChanged() }) {
             SettingsView().environmentObject(model)
         }
+        .fullScreenCover(isPresented: $showNav, onDismiss: { model.startPreview(); model.refreshSessions() }) {
+            NavModeView()
+        }
         .sheet(isPresented: $showSessions) {
             SessionsView().environmentObject(model)
         }
@@ -67,11 +82,33 @@ struct ContentView: View {
     @ViewBuilder private var preview: some View {
         switch model.settings.mode {
         case .arkitRGBD:
-            ARPreview(session: model.ar.session)
+            ZStack {
+                ARPreview(session: model.ar.session)
+                CoverageOverlay(session: model.ar.session, resetToken: model.recordingIndex)
+            }
         case .arkitRoomPlan:
-            RoomPreview(recorder: model.room, session: model.ar.session)
+            ZStack {
+                RoomPreview(recorder: model.room, session: model.ar.session)
+                CoverageOverlay(session: model.ar.session, resetToken: model.recordingIndex)
+            }
         case .multiCam:
-            MultiCamPreview(recorder: model.multicam)
+            ZStack(alignment: .topTrailing) {
+                MultiCamPreview(recorder: model.multicam)
+                if let img = model.depthPreview {
+                    // AVFoundation depth is in sensor (landscape) orientation; the app is portrait.
+                    Image(uiImage: UIImage(cgImage: img, scale: 1, orientation: .right))
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(alignment: .bottom) {
+                            Text("LiDAR depth").font(.caption2).padding(2)
+                        }
+                        .padding(.top, 140)
+                        .padding(.trailing, 12)
+                        .allowsHitTesting(false)
+                }
+            }
         }
     }
 }
@@ -104,24 +141,36 @@ struct RoomPreview: UIViewRepresentable {
 final class PreviewHostView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    /// Used when the capture session has no room for a preview connection (see MultiCamRecorder).
+    let fallbackLayer = AVSampleBufferDisplayLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        fallbackLayer.videoGravity = .resizeAspectFill
+        layer.addSublayer(fallbackLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Sensor frames are landscape; rotate the fallback layer to the portrait UI.
+        fallbackLayer.bounds = CGRect(x: 0, y: 0, width: bounds.height, height: bounds.width)
+        fallbackLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        fallbackLayer.setAffineTransform(CGAffineTransform(rotationAngle: .pi / 2))
+    }
 }
 
 struct MultiCamPreview: UIViewRepresentable {
     let recorder: MultiCamRecorder
     func makeUIView(context: Context) -> PreviewHostView {
-        let v = PreviewHostView()
-        v.previewLayer.setSessionWithNoConnection(recorder.session)
+        let v = PreviewHostView(frame: .zero)
         v.previewLayer.videoGravity = .resizeAspectFill
-        connect(v)
+        recorder.attachPreview(v.previewLayer, fallback: v.fallbackLayer)
         return v
     }
     func updateUIView(_ uiView: PreviewHostView, context: Context) {
-        if uiView.previewLayer.connection == nil { connect(uiView) }
-    }
-    private func connect(_ v: PreviewHostView) {
-        guard let port = recorder.previewPort else { return }
-        let conn = AVCaptureConnection(inputPort: port, videoPreviewLayer: v.previewLayer)
-        if recorder.session.canAddConnection(conn) { recorder.session.addConnection(conn) }
+        recorder.attachPreview(uiView.previewLayer, fallback: uiView.fallbackLayer)
     }
 }
 
@@ -198,10 +247,14 @@ struct SessionsView: View {
                     Text(model.uploadStatus).font(.caption)
                 }
                 ForEach(model.sessions, id: \.self) { url in
-                    VStack(alignment: .leading) {
-                        Text(url.lastPathComponent).font(.body.monospaced())
-                        Text(ByteCountFormatter.string(fromByteCount: SessionStorage.size(of: url), countStyle: .file))
-                            .font(.caption).foregroundStyle(.secondary)
+                    NavigationLink {
+                        SessionViewer(url: url)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(url.lastPathComponent).font(.body.monospaced())
+                            Text(ByteCountFormatter.string(fromByteCount: SessionStorage.size(of: url), countStyle: .file))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     .swipeActions {
                         Button(role: .destructive) { model.delete(url) } label: { Label("Delete", systemImage: "trash") }

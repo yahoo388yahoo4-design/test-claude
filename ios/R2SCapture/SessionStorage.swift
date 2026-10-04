@@ -51,8 +51,38 @@ enum SessionStorage {
     }
 
     static func writeJSON(_ obj: Any, to url: URL) {
+        let obj = JSONSafe.clean(obj)
+        guard JSONSerialization.isValidJSONObject(obj) else { return }
         if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: url)
+        }
+    }
+}
+
+/// JSONSerialization raises an Objective-C exception (an app crash `try?` cannot catch) on NaN or
+/// infinite numbers, which camera metadata can contain. Replace them with null before serialising.
+enum JSONSafe {
+    static func clean(_ v: Any) -> Any {
+        switch v {
+        case let d as Double: return d.isFinite ? d : NSNull()
+        case let f as Float: return f.isFinite ? Double(f) : NSNull()
+        case let m as [String: Any]: return m.mapValues { clean($0) }
+        case let a as [Any]: return a.map { clean($0) }
+        default: return v
+        }
+    }
+}
+
+/// Writes uncaught Objective-C exceptions to Documents/crash_logs so they can be read in the Files app.
+enum CrashLog {
+    static func install() {
+        NSSetUncaughtExceptionHandler { e in
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let dir = docs.appendingPathComponent("crash_logs", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let text = "\(Date())\n\(e.name.rawValue): \(e.reason ?? "")\n\n" + e.callStackSymbols.joined(separator: "\n")
+            try? text.write(to: dir.appendingPathComponent("crash_\(Int(Date().timeIntervalSince1970)).txt"),
+                            atomically: true, encoding: .utf8)
         }
     }
 }
@@ -85,7 +115,9 @@ final class LineWriter {
     }
 
     func writeJSON(_ obj: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: []),
+        let obj = JSONSafe.clean(obj)
+        guard JSONSerialization.isValidJSONObject(obj),
+              let data = try? JSONSerialization.data(withJSONObject: obj, options: []),
               let s = String(data: data, encoding: .utf8) else { return }
         write(s)
     }

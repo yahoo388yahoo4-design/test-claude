@@ -46,7 +46,57 @@ server instead of the Windows/macOS AltServer; the iPhone-side steps are the sam
 **SideStore** (sidestore.io): after a one-time pairing from a computer it refreshes apps on the phone
 itself through a VPN loopback, with no computer needed afterwards.
 
-## 2. Alternative: Sideloadly (Windows / macOS)
+## 2. From Linux (no Windows or Mac needed)
+
+Not tested by us; these are the tools' documented routes.
+
+**Easiest: Plume Impactor (GUI, Flathub).**
+
+```bash
+sudo apt install usbmuxd libimobiledevice-utils     # Debian/Ubuntu; other distros: same package names
+cd ~                                                # avoids "getcwd() failed" if your shell sits in a deleted folder
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub dev.khcrysalis.PlumeImpactor
+flatpak run dev.khcrysalis.PlumeImpactor
+```
+
+No flatpak? Use the AppImage from <https://github.com/claration/Impactor/releases> (v2.6.5):
+
+```bash
+sudo apt install libfuse2t64                        # AppImages need FUSE 2 on Ubuntu 24.04+
+curl -LO https://github.com/claration/Impactor/releases/download/v2.6.5/Impactor-linux-x86_64.appimage
+chmod +x Impactor-linux-x86_64.appimage && ./Impactor-linux-x86_64.appimage
+```
+
+Plug in the iPhone, unlock it and tap **Trust**, then check the link with `idevicepair pair` (should print
+SUCCESS). Open Plume Impactor, sign in with your Apple ID, pick `R2SCapture-unsigned.ipa` and install.
+
+**Command line: Dadoum's Sideloader** (crashed with a segfault at "Logging in..." on Ubuntu 26.04 for us; use Plume Impactor if it does) (<https://github.com/Dadoum/Sideloader>, latest release 1.0-pre4).
+Works on Ubuntu 24.04/26.04 (x86_64). On an ARM machine swap `x86_64` for `aarch64` in the file name.
+
+```bash
+cd ~
+sudo apt install usbmuxd libimobiledevice-utils unzip curl
+mkdir -p ~/sideloader && cd ~/sideloader
+curl -LO https://github.com/Dadoum/Sideloader/releases/download/1.0-pre4/sideloader-cli-x86_64-linux-gnu.zip
+unzip -o sideloader-cli-x86_64-linux-gnu.zip
+chmod +x sideloader-cli-x86_64-linux-gnu
+idevicepair pair                                    # after tapping Trust on the phone; should print SUCCESS
+./sideloader-cli-x86_64-linux-gnu install ~/Downloads/R2SCapture-unsigned.ipa -i   # -i asks for Apple ID and password
+```
+
+The zip also contains a `.dbg` debug file; ignore it and run the binary by its exact name. A GTK window
+version also exists (`sudo apt install libgtk-4-1 libadwaita-1-0`, then the same steps with
+`sideloader-gtk-x86_64-linux-gnu.zip`), but the CLI is the simpler one.
+
+It downloads Apple's signing helper on first run and sends your credentials only to Apple; any Apple ID
+works, not necessarily the one on the phone.
+
+**Either way, then on the iPhone:** trust the developer profile (Settings → General → VPN & Device
+Management) and turn on Developer Mode (Settings → Privacy & Security, then restart). Re-run the install
+within 7 days to refresh it. AltServer-Linux (section 1) also works but needs a separate anisette server.
+
+## 3. Alternative: Sideloadly (Windows / macOS)
 
 1. Install **Sideloadly** from <https://sideloadly.io> (on Windows, again iTunes + iCloud from Apple's
    website, not the Store).
@@ -57,7 +107,7 @@ itself through a VPN loopback, with no computer needed afterwards.
 4. Expiry is again 7 days. Sideloadly can auto-refresh over Wi-Fi if you enable that in its advanced
    options and leave it running.
 
-## 3. First launch
+## 4. First launch
 
 Allow Camera, Motion & Fitness, Location (optional, for GPS) and Local Network (only needed for Wi-Fi
 upload). Captures appear in **Files → On My iPhone → R2S Capture → sessions**, or upload them to

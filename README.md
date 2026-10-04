@@ -10,6 +10,10 @@ with an iPhone 17 Pro, and how to get the **richest** data out of the phone.
 | Capture today, ARKitScenes-style RGB-D + poses | **Stray Scanner** (free, open source) | `tools/convert.py --to arkitscenes` |
 | Every sensor the phone has (cameras, LiDAR, IMU, GPS, barometer…) in one raw format | **R2S Capture**, the app in `ios/` | `tools/convert.py` → ARKitScenes **and** LiteReality, plus `extras/` |
 
+**New: navigation mode.** The app's **Nav** button turns the phone into a robot's SLAM, obstacle-avoidance
+and path-planning stack, with voice and visual guidance and motor control over Wi-Fi or Bluetooth. See
+[NAVIGATION.md](NAVIGATION.md) and [robot/PROTOCOL.md](robot/PROTOCOL.md).
+
 Contents: [what the datasets contain](#1-what-the-two-datasets-contain) ·
 [ready-made apps](#2-ready-made-apps) · [our app](#3-r2s-capture-our-app) ·
 [sensor table](#4-every-iphone-17-pro-sensor-and-where-it-lands) · [build and install](#5-build-and-install-without-a-mac) ·
