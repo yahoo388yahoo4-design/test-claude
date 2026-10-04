@@ -63,14 +63,23 @@ flatpak run dev.khcrysalis.PlumeImpactor
 Plug in the iPhone, unlock it and tap **Trust**, then check the link with `idevicepair pair` (should print
 SUCCESS). Open Plume Impactor, sign in with your Apple ID, pick `R2SCapture-unsigned.ipa` and install.
 
-**Command line: Dadoum's Sideloader** (<https://github.com/Dadoum/Sideloader>, builds under its Actions tab).
+**Command line: Dadoum's Sideloader** (<https://github.com/Dadoum/Sideloader>, latest release 1.0-pre4).
+Works on Ubuntu 24.04/26.04 (x86_64). On an ARM machine swap `x86_64` for `aarch64` in the file name.
 
 ```bash
-sudo apt install usbmuxd libimobiledevice-utils
-idevicepair pair                                    # after tapping Trust on the phone
-chmod +x ./sideloader-cli*                       # the Linux CLI build you downloaded
-./sideloader-cli* install R2SCapture-unsigned.ipa -i   # -i asks for Apple ID interactively
+cd ~
+sudo apt install usbmuxd libimobiledevice-utils unzip curl
+mkdir -p ~/sideloader && cd ~/sideloader
+curl -LO https://github.com/Dadoum/Sideloader/releases/download/1.0-pre4/sideloader-cli-x86_64-linux-gnu.zip
+unzip -o sideloader-cli-x86_64-linux-gnu.zip
+chmod +x sideloader*
+idevicepair pair                                    # after tapping Trust on the phone; should print SUCCESS
+./sideloader-cli* install ~/Downloads/R2SCapture-unsigned.ipa -i   # -i asks for Apple ID and password
 ```
+
+If the unzipped binary has a different name, run `ls ~/sideloader` and use that name. A GTK window
+version also exists (`sudo apt install libgtk-4-1 libadwaita-1-0`, then the same steps with
+`sideloader-gtk-x86_64-linux-gnu.zip`), but the CLI is the simpler one.
 
 It downloads Apple's signing helper on first run and sends your credentials only to Apple; any Apple ID
 works, not necessarily the one on the phone.
