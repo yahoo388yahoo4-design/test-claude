@@ -4,5 +4,5 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${TMPDIR:-/tmp}/r2s_navtests"
-"${SWIFTC:-swiftc}" -O "$here/../R2SCapture/Nav/NavCore.swift" "$here/../R2SCapture/Nav/NavMapPrior.swift" "$here/main.swift" -o "$out"
+"${SWIFTC:-swiftc}" -O "$here/../R2SCapture/Nav/NavCore.swift" "$here/../R2SCapture/Nav/NavMapPrior.swift" "$here/../R2SCapture/Nav/NavPerception.swift" "$here/../R2SCapture/Nav/NavSettings.swift" "$here/main.swift" -o "$out"
 "$out"

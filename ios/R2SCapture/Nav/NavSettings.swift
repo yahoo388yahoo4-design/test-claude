@@ -58,12 +58,20 @@ struct NavSettings: Codable, Equatable {
     /// false = the command is sent to the robot as is (it needs encoders or timing to execute it).
     var closedLoopMoves = true
     var minimapSpan = 8.0          // metres shown across the minimap
+    /// Debug overlay: draw the LiDAR points counted as obstacles (red) and drops (orange) in the camera view.
+    var showObstaclePoints = true
 
     private static let key = "r2s.navSettings.v1"
 
+    /// Loads saved settings; keys added in later versions take their defaults instead of resetting everything.
     static func load() -> NavSettings {
         guard let data = UserDefaults.standard.data(forKey: key),
-              let s = try? JSONDecoder().decode(NavSettings.self, from: data) else { return NavSettings() }
+              let stored = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let defaults = try? JSONEncoder().encode(NavSettings()),
+              var merged = (try? JSONSerialization.jsonObject(with: defaults)) as? [String: Any] else { return NavSettings() }
+        for (k, v) in stored { merged[k] = v }
+        guard let mergedData = try? JSONSerialization.data(withJSONObject: merged),
+              let s = try? JSONDecoder().decode(NavSettings.self, from: mergedData) else { return NavSettings() }
         return s
     }
 

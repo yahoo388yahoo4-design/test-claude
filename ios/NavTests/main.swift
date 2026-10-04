@@ -8,6 +8,7 @@ func check(_ cond: Bool, _ msg: String, file: String = #file, line: Int = #line)
     if cond { print("  ok  \(msg)") } else { failures += 1; print("FAIL  \(msg)  (line \(line))") }
 }
 func near(_ a: Double, _ b: Double, _ tol: Double) -> Bool { abs(a - b) <= tol }
+func fmt(_ x: Double) -> String { x.isFinite ? String(format: "%.2f m", x) : "clear" }
 
 print("conventions")
 do {
@@ -185,6 +186,117 @@ do {
     check(m.vertices == 6 && m.cells == 3, "mesh: 3 obstacle vertices -> \(m.cells) cells")
     check(g2.isOccupied(P2(2, 0.5)), "mesh obstacle marked")
     check(!g2.isOccupied(P2(1, 0)), "mesh floor not an obstacle")
+}
+
+print("perception (LiDAR point classification, user report: \"obstacle ahead 0 cm\" with nothing near)")
+do {
+    // Synthetic LiDAR: a camera at height camH looking along +x (robot theta 0), rays over a 60 x 45 degree
+    // field tilted down by `tilt`, hitting the floor (y = 0), a wall at x = wallX and optional boxes.
+    struct Box { var x0, x1, z0, z1, h: Double }
+    func scanScene(camH: Double, tilt: Double, wallX: Double, boxes: [Box]) -> [DepthPoint] {
+        var pts: [DepthPoint] = []
+        for yawDeg in stride(from: -30.0, through: 30.0, by: 1.0) {
+            for pitchDeg in stride(from: -22.0, through: 22.0, by: 1.0) {
+                let pitch = rad(pitchDeg) - tilt, yaw = rad(yawDeg)
+                let dir = (x: cos(pitch) * cos(yaw), y: sin(pitch), z: -cos(pitch) * sin(yaw))
+                var t = 0.05
+                while t < 5 {
+                    let x = dir.x * t, y = camH + dir.y * t, z = dir.z * t
+                    var hit = y <= 0 || x >= wallX
+                    for b in boxes where x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1 && y <= b.h { hit = true }
+                    if hit {
+                        if t > 0.2 { pts.append(DepthPoint(x: x, y: max(0, y), z: z, conf: 2)) }
+                        break
+                    }
+                    t += 0.01
+                }
+            }
+        }
+        return pts
+    }
+    let pose = Pose2(p: P2(0, 0), theta: 0)
+    let cfg = PerceptionConfig()
+
+    // 1. Handheld phone (1.3 m) in an empty room with a wall 3 m ahead.
+    let room = scanScene(camH: 1.3, tilt: rad(20), wallX: 3, boxes: [])
+    var fl = FloorEstimator()
+    fl.update(planeY: nil, cameraY: 1.3, mountHeight: 0.25, now: 0)
+    let before = Perception.classify(room, pose: pose, floorY: fl.y!, cliffsAllowed: fl.stable(now: 0), cfg: cfg)
+    check(before.frontGap > 2.5, "no floor plane yet, wrong mount height: no false obstacle ahead (gap \(fmt(before.frontGap)))")
+    fl.update(planeY: 0.0, cameraY: 1.3, mountHeight: 0.25, now: 0.1)
+    check(fl.y == 0 && fl.source == .plane, "floor plane found: estimate snaps to it instead of blending")
+    for t in stride(from: 0.2, through: 2.0, by: 0.1) {
+        fl.update(planeY: 0.0, cameraY: 1.3, mountHeight: 0.25, now: t)
+        let r = Perception.classify(room, pose: pose, floorY: fl.y!, cliffsAllowed: fl.stable(now: t), cfg: cfg)
+        if r.frontGap < 2.5 || r.cliffPoints > 0 {
+            check(false, "floor seen as obstacle/drop at t=\(t): gap \(fmt(r.frontGap)), \(r.cliffPoints) drop points")
+            break
+        }
+    }
+    let after = Perception.classify(room, pose: pose, floorY: 0, cliffsAllowed: true, cfg: cfg)
+    check(after.frontGap > 2.6 && after.frontGap < 2.9, "empty room: front gap is the wall, \(fmt(after.frontGap)) (expect ~2.8 m)")
+    check(after.cliffPoints == 0, "flat floor gives no drop points")
+
+    // 2. The old behaviour this replaces: blending 0.9 * old + 0.1 * plane from the fallback made the
+    //    real floor read as a drop for ~1.5 s, i.e. "obstacle ahead" on an empty floor.
+    let blended = 0.9 * (1.3 - 0.25) + 0.1 * 0.0
+    let old = Perception.classify(room, pose: pose, floorY: blended, cliffsAllowed: true, cfg: cfg)
+    check(old.frontGap < 1.5, "reproduced: a mid-blend floor estimate reports a false obstacle (gap \(fmt(old.frontGap)))")
+
+    // 3. A few stray LiDAR pixels right in front are ignored.
+    var noisy = room
+    for k in 0..<4 { noisy.append(DepthPoint(x: 0.3 + 0.01 * Double(k), y: 0.4, z: 0.0, conf: 1)) }
+    let n = Perception.classify(noisy, pose: pose, floorY: 0, cliffsAllowed: true, cfg: cfg)
+    check(n.frontGap > 2.5, "4 stray pixels 30 cm ahead do not block (gap \(fmt(n.frontGap)))")
+    let low = [DepthPoint](repeating: DepthPoint(x: 0.5, y: 0.3, z: 0, conf: 0), count: 50)
+    check(Perception.classify(room + low, pose: pose, floorY: 0, cliffsAllowed: true, cfg: cfg).frontGap > 2.5,
+          "low-confidence pixels are ignored")
+
+    // 4. Real obstacles are still caught: a 30 cm box 70 cm ahead, on a robot-mounted phone at 25 cm.
+    let box = scanScene(camH: 0.25, tilt: rad(10), wallX: 4, boxes: [Box(x0: 0.7, x1: 1.0, z0: -0.15, z1: 0.15, h: 0.3)])
+    let b = Perception.classify(box, pose: pose, floorY: 0, cliffsAllowed: true, cfg: cfg)
+    check(abs(b.frontGap - 0.5) < 0.05, "box 70 cm ahead: front gap \(fmt(b.frontGap)) (expect 0.50 m from the robot edge)")
+    check(b.sectors[4] < 0.6 && b.markers[4] != nil, "centre sector sees the box")
+    // Box beside the path, outside the robot's width: not in the corridor.
+    let side = scanScene(camH: 0.25, tilt: rad(10), wallX: 4, boxes: [Box(x0: 0.5, x1: 0.8, z0: -0.7, z1: -0.35, h: 0.3)])
+    let sd = Perception.classify(side, pose: pose, floorY: 0, cliffsAllowed: true, cfg: cfg)
+    check(sd.frontGap > 3, "box to the left, clear of the robot's width: front stays clear (gap \(fmt(sd.frontGap)))")
+    check(sd.sectors.prefix(4).contains { $0 < 0.6 }, "...but a left sector shows it")
+
+    // 5. A step down 1 m ahead is a drop once the floor plane is stable, not before.
+    var stairs = room.filter { $0.x < 1.0 }
+    for x in stride(from: 1.05, to: 2.0, by: 0.03) { for z in stride(from: -0.3, through: 0.3, by: 0.03) { stairs.append(DepthPoint(x: x, y: -0.3, z: z, conf: 2)) } }
+    check(Perception.classify(stairs, pose: pose, floorY: 0, cliffsAllowed: true, cfg: cfg).frontGap < 1.0, "drop 1 m ahead stops the robot when the floor is known")
+    check(Perception.classify(stairs, pose: pose, floorY: 0, cliffsAllowed: false, cfg: cfg).frontGap > 2, "drops ignored while the floor is only estimated")
+
+    // 6. Map corridor: own footprint never counts; a wall 1 m ahead does.
+    let g = OccupancyGrid(cell: 0.05, sizeMeters: 10)
+    for z in stride(from: -0.1, through: 0.1, by: 0.025) { g.markStatic(P2(0.1, z)) }       // under the robot
+    check(Perception.corridorGap(grid: g, pose: pose, radius: 0.2) == .infinity, "map cells under the robot are not an obstacle ahead")
+    for z in stride(from: -1.0, through: 1.0, by: 0.025) { g.markStatic(P2(1.0, z)) }
+    let cg = Perception.corridorGap(grid: g, pose: pose, radius: 0.2)
+    check(abs(cg - 0.8) < 0.06, "map wall 1 m ahead: corridor gap \(fmt(cg))")
+
+    // 7. Stale map cells where the robot now stands (e.g. a false obstacle mapped earlier, then walked
+    //    onto; the camera never sees under the robot again, so nothing cleared it): the old corridor
+    //    check reported 0 cm forever. Clearing the robot's footprint fixes the map itself.
+    let stale = OccupancyGrid(cell: 0.05, sizeMeters: 10)
+    for x in stride(from: -0.4, through: 0.6, by: 0.025) { for z in stride(from: -0.4, through: 0.4, by: 0.025) { stale.markStatic(P2(x, z)) } }
+    let sg = Perception.corridorGap(grid: stale, pose: pose, radius: 0.2)
+    check(sg <= 0.12, "reproduced: stale cells around the robot read as \(fmt(sg))")
+    for x in stride(from: 0.0, through: 0.6, by: 0.05) { stale.clearDisc(center: P2(x, 0), radius: 0.25) }   // robot drives 60 cm
+    let after2 = Perception.corridorGap(grid: stale, pose: Pose2(p: P2(0.6, 0), theta: 0), radius: 0.2)
+    check(after2 == .infinity, "cells the robot drove over are cleared (gap \(fmt(after2)))")
+}
+
+print("settings")
+do {
+    // Settings saved by an older version (no showObstaclePoints key) keep their values.
+    UserDefaults.standard.set(Data(#"{"link":"ble","wsURL":"ws://10.0.0.5:8777/robot","maxSpeed":0.2}"#.utf8), forKey: "r2s.navSettings.v1")
+    let s = NavSettings.load()
+    check(s.link == .ble && s.wsURL == "ws://10.0.0.5:8777/robot" && s.maxSpeed == 0.2 && s.showObstaclePoints,
+          "older saved settings load, new keys take defaults")
+    UserDefaults.standard.removeObject(forKey: "r2s.navSettings.v1")
 }
 
 print("closed-loop simulation (differential drive, simulated depth sensor, replanning)")
