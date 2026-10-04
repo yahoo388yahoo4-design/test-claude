@@ -46,7 +46,37 @@ server instead of the Windows/macOS AltServer; the iPhone-side steps are the sam
 **SideStore** (sidestore.io): after a one-time pairing from a computer it refreshes apps on the phone
 itself through a VPN loopback, with no computer needed afterwards.
 
-## 2. Alternative: Sideloadly (Windows / macOS)
+## 2. From Linux (no Windows or Mac needed)
+
+Not tested by us; these are the tools' documented routes.
+
+**Easiest: Plume Impactor (GUI, Flathub).**
+
+```bash
+sudo apt install usbmuxd libimobiledevice-utils     # Debian/Ubuntu; other distros: same package names
+flatpak install flathub dev.khcrysalis.PlumeImpactor
+```
+
+Plug in the iPhone, unlock it and tap **Trust**, then check the link with `idevicepair pair` (should print
+SUCCESS). Open Plume Impactor, sign in with your Apple ID, pick `R2SCapture-unsigned.ipa` and install.
+
+**Command line: Dadoum's Sideloader** (<https://github.com/Dadoum/Sideloader>, builds under its Actions tab).
+
+```bash
+sudo apt install usbmuxd libimobiledevice-utils
+idevicepair pair                                    # after tapping Trust on the phone
+chmod +x ./sideloader-cli*                       # the Linux CLI build you downloaded
+./sideloader-cli* install R2SCapture-unsigned.ipa -i   # -i asks for Apple ID interactively
+```
+
+It downloads Apple's signing helper on first run and sends your credentials only to Apple; any Apple ID
+works, not necessarily the one on the phone.
+
+**Either way, then on the iPhone:** trust the developer profile (Settings → General → VPN & Device
+Management) and turn on Developer Mode (Settings → Privacy & Security, then restart). Re-run the install
+within 7 days to refresh it. AltServer-Linux (section 1) also works but needs a separate anisette server.
+
+## 3. Alternative: Sideloadly (Windows / macOS)
 
 1. Install **Sideloadly** from <https://sideloadly.io> (on Windows, again iTunes + iCloud from Apple's
    website, not the Store).
@@ -57,7 +87,7 @@ itself through a VPN loopback, with no computer needed afterwards.
 4. Expiry is again 7 days. Sideloadly can auto-refresh over Wi-Fi if you enable that in its advanced
    options and leave it running.
 
-## 3. First launch
+## 4. First launch
 
 Allow Camera, Motion & Fitness, Location (optional, for GPS) and Local Network (only needed for Wi-Fi
 upload). Captures appear in **Files → On My iPhone → R2S Capture → sessions**, or upload them to
