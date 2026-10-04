@@ -138,6 +138,38 @@ speeds, map size and tracking state. Settings (saved): phone mount height and ho
 turning centre it sits, robot radius and height, max speed and turn rate, slow / stop distances, goal
 tolerance. Each run logs `nav/<time>/nav.jsonl` (pose, command, distances at 5 Hz).
 
+### Sessions and playback viewer
+
+**Sessions** (main screen, disabled while recording) lists the recorded sessions, newest first, with
+mode, duration, size and frame count. Each one has **Open**, **Upload** (the receiver URL field is the
+same setting as on the main screen) and **Delete** (asks first). **Open** plays the session back on
+the phone, like the iPhone app's viewer (`ios/R2SCapture/SessionViewer.swift`):
+
+* **Video.** Mode A plays `video.mp4` with the ARCore depth map (raw or smoothed) alpha-blended on
+  top. Each depth map is matched to the frame on screen by timestamp (`video.mp4.pts.csv`, then
+  `frames.jsonl`). Below the video: frame time, tracking state, position and yaw, intrinsics and
+  exposure. Mode B plays every lens video side by side, in sync on the sensor clock (each lens
+  starts at its own first timestamp). The ToF depth is shown as an extra tile when there is one,
+  with the RAW DNG and ToF counts and each lens's size, codec, K, exposure and ISO at the playhead.
+  **Rotate** turns the sensor-oriented image upright. It defaults to the camera's sensor orientation
+  and the setting is remembered.
+* **3D.** The live-map point cloud (`extras/map/points.ply`, or a `mesh.ply` when one exists)
+  coloured by height, the camera trajectory in yellow and the camera at the playhead in red. Drag to
+  orbit, pinch to zoom, use two fingers to pan, and double-tap to reset.
+* **Map.** The top-down occupancy map (`extras/map`), with the trajectory and an arrow for the camera
+  at the playhead.
+* **Sensors.** Charts of accelerometer, gyro, magnetometer, the fused IMU (user acceleration,
+  gravity, orientation, heading), barometer and relative altitude, GNSS speed, accuracy, altitude and
+  satellites, thermal state, battery level and temperature, thermal headroom, camera exposure / ISO,
+  and every other sensor in `extras/sensors_raw.csv` (light, proximity, temperature, humidity,
+  rotation vectors, …). A cursor follows the playhead, and tapping a chart seeks there. Sessions
+  without video (sensors only) get a virtual clock over the recording, so they can be played too.
+* **Info.** `session.json`, pretty-printed, and every file with its size.
+
+The transport bar (play/pause, scrubber, 0.25×–4× speed) drives all tabs. Missing files are skipped,
+and a tab with nothing to show explains why. For example, mode B has no on-device poses, so it has no
+3D or map.
+
 ## 3. Capture tips (13 Ultra)
 
 * **Mode A first.** It is the only mode with on-device poses and depth, and the converter turns it
@@ -163,7 +195,7 @@ tolerance. Each run logs `nav/<time>/nav.jsonl` (pose, command, distances at 5 H
   Capture, or upload over Wi-Fi.
 * **Wi-Fi:** run the shared receiver on fleet-3090 or a laptop,
   `python tools/receiver.py --root ~/captures --port 8765 --token SECRET [--convert OUT]`. Then in the
-  app enter `http://<host>:8765#SECRET` and press **Upload last**. It is the same protocol as the iOS
+  app enter `http://<host>:8765#SECRET` and press **Upload last**, or **Upload** next to any session under **Sessions**. It is the same protocol as the iOS
   app: per-file `PUT /upload/<session>/<path>`, a HEAD check so a restarted upload resumes, and a
   `.complete` marker at the end. To reach fleet-3090 from outside the LAN, use an SSH tunnel
   (`ssh -L 8765:localhost:8765 ...` from a laptop on the same Wi-Fi as the phone).

@@ -86,6 +86,8 @@
                 android:layout_height="wrap_content" android:text="Upload last" />
             <Button android:id="@+id/btnNav" android:layout_width="0dp" android:layout_weight="1"
                 android:layout_height="wrap_content" android:text="Navigate" />
+            <Button android:id="@+id/btnSessions" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Sessions" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>
