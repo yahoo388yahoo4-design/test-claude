@@ -19,6 +19,7 @@ enum VoiceAction: Equatable {
     case goToPoint(forward: Double, left: Double)
     case setMode(String)            // "guide", "auto", "manual"
     case clearGoal
+    case savePlace(String)         // remember the robot's current position under this name
     case status
     case say(String)
 
@@ -39,6 +40,7 @@ enum VoiceAction: Equatable {
         case .goToPoint(let f, let l): return String(format: "go to point %.1f m ahead, %.1f m left", f, l)
         case .setMode(let m): return "\(m) mode"
         case .clearGoal: return "clear goal"
+        case .savePlace(let n): return "remember \(n)"
         case .status: return "status"
         case .say(let s): return "say \"\(s)\""
         }
@@ -113,6 +115,12 @@ enum IntentParser {
     static func parseOne(_ t: String, labels: [String]) -> VoiceAction? {
         let w = words(t)
         let has: (String) -> Bool = { w.contains($0) }
+        for lead in ["remember this place as", "remember this spot as", "remember this position as", "remember this as",
+                     "save this place as", "save this spot as", "save this position as", "call this place", "call this spot",
+                     "mark this place as", "mark this spot as", "this place is", "this is the"] where t.hasPrefix(lead + " ") {
+            let name = stripArticles(String(t.dropFirst(lead.count + 1)))
+            return name.isEmpty ? nil : .savePlace(name)
+        }
         if t.hasPrefix("cancel") || t.contains("clear the goal") || t.contains("clear goal") || t == "never mind" {
             return .clearGoal
         }
@@ -271,6 +279,8 @@ enum VoiceTools {
             fn("set_mode", "Switch navigation mode: guide (voice and arrows only), auto (drive the robot along the path), manual.",
                ["mode": ["type": "string", "enum": ["guide", "auto", "manual"]]], required: ["mode"]),
             fn("clear_goal", "Forget the current goal and stop following it."),
+            fn("save_place", "Remember the robot's current position under a name, for go_to later.",
+               ["name": ["type": "string"]], required: ["name"]),
             fn("get_status", "Get the robot's position, goal, obstacles, link and battery."),
         ]
     }
@@ -280,7 +290,7 @@ enum VoiceTools {
         You control a small wheeled robot with a phone as its sensor head, by voice. Units: metres and degrees; \
         positive turn = left. Only do what the user asked; ask back if a command is unclear or unsafe. \
         Prefer one short spoken reply (under 20 words, no markdown, no emoji).
-        Known objects: \(labels.isEmpty ? "none (no room scan loaded)" : labels.joined(separator: ", ")).
+        Known objects and places: \(labels.isEmpty ? "none yet (load a room scan, or save places)" : labels.joined(separator: ", ")).
         Current state: \(state)
         """
         if jsonOnly {
@@ -289,7 +299,7 @@ enum VoiceTools {
             Reply with ONLY a JSON object, no other text: \
             {"actions":[{"tool":"move","distance_m":1.0}],"say":"Moving one metre."}. \
             Tools: stop; move{distance_m}; turn{degrees}; go_to{target}; go_to_point{forward_m,left_m}; \
-            set_mode{mode: guide|auto|manual}; clear_goal; get_status. Use "actions":[] to only answer.
+            set_mode{mode: guide|auto|manual}; clear_goal; save_place{name}; get_status. Use "actions":[] to only answer.
             """
         }
         return s
@@ -321,6 +331,7 @@ enum VoiceTools {
         case "set_mode":
             if let m = a["mode"] as? String, ["guide", "auto", "manual"].contains(m) { action = .setMode(m) } else { action = nil }
         case "clear_goal": action = .clearGoal
+        case "save_place": action = (a["name"] as? String).map { .savePlace($0.lowercased()) }
         case "get_status": action = .status
         default: action = nil
         }

@@ -48,7 +48,8 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tee xcodebuild.log | grep -E "error:|warning: .*deprecated|BUILD (SUCCEEDED|FAILED)" || true
-          test -d build/Build/Products/Release-iphoneos/R2SCapture.app
+          # the .app folder exists even when compiling fails; the executable only when it succeeds
+          test -f build/Build/Products/Release-iphoneos/R2SCapture.app/R2SCapture
       - name: Package .ipa
         working-directory: ios
         run: |

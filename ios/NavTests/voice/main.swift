@@ -36,6 +36,9 @@ check(p("move forward 1 meter then turn left and go to the door") == [.move(mete
 check(p("where are you") == [.status], "status")
 check(p("switch to auto mode") == [.setMode("auto")], "auto mode")
 check(p("cancel") == [.clearGoal], "cancel")
+check(p("remember this place as the kitchen") == [.savePlace("kitchen")], "save place")
+check(p("call this spot charging dock") == [.savePlace("charging dock")], "call this spot")
+check(VoiceTools.action(name: "save_place", args: #"{"name":"Desk"}"#) == .savePlace("desk"), "save_place tool")
 check(p("what's the meaning of life") == nil, "chit-chat -> LLM")
 check(p("") == nil, "empty")
 
