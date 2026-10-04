@@ -232,10 +232,14 @@ struct SessionsView: View {
                     Text(model.uploadStatus).font(.caption)
                 }
                 ForEach(model.sessions, id: \.self) { url in
-                    VStack(alignment: .leading) {
-                        Text(url.lastPathComponent).font(.body.monospaced())
-                        Text(ByteCountFormatter.string(fromByteCount: SessionStorage.size(of: url), countStyle: .file))
-                            .font(.caption).foregroundStyle(.secondary)
+                    NavigationLink {
+                        SessionViewer(url: url)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(url.lastPathComponent).font(.body.monospaced())
+                            Text(ByteCountFormatter.string(fromByteCount: SessionStorage.size(of: url), countStyle: .file))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     .swipeActions {
                         Button(role: .destructive) { model.delete(url) } label: { Label("Delete", systemImage: "trash") }
