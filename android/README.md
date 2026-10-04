@@ -53,7 +53,7 @@ Build it yourself (Linux, no root): see §7.
 | Mode | What runs | Poses on device | Depth | Output |
 |---|---|---|---|---|
 | **A: ARCore RGB-D** (default, best for reconstruction) | ARCore session on the main wide camera, best 4:3 CPU image config, Depth API `AUTOMATIC` (raw + smoothed), HDR light estimation, planes, point cloud, optional Geospatial / SharedCamera hi-res stills / ARCore Recording API mp4 | yes, every frame | ARCore raw depth + confidence, smoothed depth | full r2s session; convert straight to ARKitScenes + LiteReality |
-| **B: Camera2 multi-cam** (no live preview) | logical rear camera with every physical lens the HAL streams at once (one HEVC per lens), RAW DNG every 1 s, full CaptureResult per frame, ToF `DEPTH16` if exposed | no (recover offline) | ToF DEPTH16 only if Xiaomi exposes it | `cams/*`; run `recover_poses.py` first |
+| **B: Camera2 multi-cam** (live preview of the main lens) | logical rear camera with every physical lens the HAL streams at once (one HEVC per lens, stepped down to fit the hardware budget), RAW DNG every 1 s, full CaptureResult per frame, ToF `DEPTH16` if exposed | no (recover offline) | ToF DEPTH16 only if Xiaomi exposes it | `cams/*`; run `recover_poses.py` first |
 | **Sensors only** | IMU / GNSS / baro / status only | – | – | sensor logs |
 
 The IMU (accelerometer, gyro, uncalibrated variants, magnetometer, rotation vectors) runs at the HAL
@@ -91,9 +91,19 @@ Options (checkboxes):
   (top right), and a HUD with frames, depth, points, mapped area, distance walked, speed and a
   72-beam virtual lidar of the nearest surfaces. Long-press the map to hide or show the 3D points.
   The map is saved with the session (`extras/map/`) and under `maps/` for navigation mode.
-* **Mode B** has no ARCore, so it shows a coverage panorama instead: a yaw × pitch grid filled in by
+* **Mode B** shows the main lens live, with a coverage panorama on top: a yaw × pitch grid filled in by
   how long the phone pointed each way (from the game rotation vector), plus live per-lens frame,
-  RAW, ToF and capture-result counts.
+  RAW, ToF and capture-result counts. The preview never disappears: it is an extra preview stream
+  on the main lens when the HAL accepts one (`preview_kind: "preview_surface"`); otherwise the
+  recorded main stream itself is shown through surface sharing, which costs no extra camera stream
+  (`"recorded_stream"`). Only if neither can be configured is it `"none"`.
+* **Mode B hardware budget** (like the iOS app): if the HAL refuses the requested lenses at 1920 px /
+  30 fps (`isSessionConfigurationSupported`, or a failed session / encoder), the app steps down to
+  1280 px, then 24 fps, then drops the lowest-priority lens one at a time until a configuration
+  works. The status line shows what it changed (`budget: reduced to 1280 px, dropped tele_4`), and
+  `session.json` records it under `android.multicam` (`budget_actions`, `budget_requested`,
+  `preview_kind`, `preview_size`, per-stream `w`/`h`/`fps`) and in a top-level `multicam` block in the
+  iOS shape (`budget_actions`, `preview`, `streams[].width/height/fps`).
 
 ### Navigation mode (phone on a robot)
 
@@ -151,6 +161,13 @@ Settings: phone mount height, robot radius, obstacle height, max speed. Each run
   app: per-file `PUT /upload/<session>/<path>`, a HEAD check so a restarted upload resumes, and a
   `.complete` marker at the end. To reach fleet-3090 from outside the LAN, use an SSH tunnel
   (`ssh -L 8765:localhost:8765 ...` from a laptop on the same Wi-Fi as the phone).
+
+* **Crash logs:** if the app crashes, the stack trace, time, device, app version and the mode that was
+  recording go to `crash_logs/crash_<unix time>.txt` next to the `sessions/` folder
+  (`/sdcard/Real2SimCapture/crash_logs/` with All files access), so `adb pull` or a USB file browser
+  finds them. The app still crashes normally afterwards. `session.json` is written with NaN /
+  infinite numbers as `null` (org.json would throw on them), and a failing writer no longer takes
+  the recording down.
 
 ## 5. Convert
 
@@ -261,8 +278,9 @@ sparser than LiDAR), real MediaCodec output, and device timing.
 * **ARCore uses one camera at a time** (the main wide). The other three rear lenses are only reachable
   in mode B, without on-device poses. Whether HyperOS lets third-party apps stream the ultrawide and
   telephotos concurrently is **unverified**. Xiaomi often restricts aux cameras to whitelisted
-  packages, and mode B then falls back to whatever subset `isSessionConfigurationSupported` accepts
-  (possibly one lens).
+  packages, and mode B then steps down its budget until the HAL accepts a configuration (possibly
+  one lens; see `budget_actions` in `session.json`). Whether surface sharing works with a physical
+  lens stream (the preview fallback) on HyperOS is also unverified.
 * **The ARCore CPU image is not the full sensor.** Typical configs top out at 1920×1080 or 1440×1080;
   the app prefers 4:3 so the 256×192 ARKitScenes frames are not distorted. Full-sensor detail needs
   the hi-res stills option.
