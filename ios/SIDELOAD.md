@@ -54,7 +54,10 @@ Not tested by us; these are the tools' documented routes.
 
 ```bash
 sudo apt install usbmuxd libimobiledevice-utils     # Debian/Ubuntu; other distros: same package names
-flatpak install flathub dev.khcrysalis.PlumeImpactor
+cd ~                                                # avoids "getcwd() failed" if your shell sits in a deleted folder
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub dev.khcrysalis.PlumeImpactor
+flatpak run dev.khcrysalis.PlumeImpactor
 ```
 
 Plug in the iPhone, unlock it and tap **Trust**, then check the link with `idevicepair pair` (should print
