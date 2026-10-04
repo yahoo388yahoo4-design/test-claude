@@ -68,8 +68,17 @@ object RobotProtocol {
  * The link counts as connected once the robot answers (hello or pong) on Wi-Fi, or once the UART
  * characteristics are found on BLE. send() may be called from any thread.
  */
+/**
+ * Pluggable transport (e.g. a USB robot adapter): send() gets one JSON object per call; the transport
+ * passes every robot -> phone JSON line to the `incoming` callback given to [RobotLink.connectCustom].
+ */
+fun interface RobotTransport {
+    fun send(json: String): Boolean
+    fun close() {}
+}
+
 class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit) {
-    enum class Kind { NONE, WIFI, BLE }
+    enum class Kind { NONE, WIFI, BLE, CUSTOM }
 
     @Volatile var kind = Kind.NONE; private set
     @Volatile var stateText = "robot: off"; private set
@@ -99,12 +108,26 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
     private val client = OkHttpClient.Builder().connectTimeout(4, TimeUnit.SECONDS).build()
     private var pingTicker: Thread? = null
     private var ble: BleUart? = null
+    private var custom: RobotTransport? = null
+
+    /**
+     * Connects through an injected transport. [make] receives the incoming-line callback and returns the
+     * transport; the link counts as connected once the robot answers hello or ping.
+     */
+    fun connectCustom(label: String, make: (incoming: (String) -> Unit) -> RobotTransport) {
+        disconnect()
+        kind = Kind.CUSTOM
+        setState("connecting $label", false)
+        custom = make(::handle)
+        sendRaw(RobotProtocol.hello("R2S Capture Android"))
+        startPing()
+    }
 
     fun connect(kind: Kind, wsUrl: String, bleName: String) {
         disconnect()
         this.kind = kind
         when (kind) {
-            Kind.NONE -> setState("robot: off (guide only)", false)
+            Kind.NONE, Kind.CUSTOM -> setState("robot: off (guide only)", false)
             Kind.WIFI -> {
                 var url = wsUrl.trim()
                 if (!url.startsWith("ws://") && !url.startsWith("wss://")) url = "ws://$url"
@@ -125,7 +148,11 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
                 ble = BleUart(ctx, bleName, { s, ok -> setState(s, ok); if (ok) sendRaw(RobotProtocol.hello("R2S Capture Android")) }, ::handle).also { it.start() }
             }
         }
-        if (kind != Kind.NONE) pingTicker = Thread {
+        if (kind != Kind.NONE) startPing()
+    }
+
+    private fun startPing() {
+        pingTicker = Thread {
             try {
                 while (true) {
                     Thread.sleep(1000)
@@ -140,6 +167,7 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
         if (connected) sendRaw(RobotProtocol.stop(nextSeq()))
         ws?.close(1000, "bye"); ws = null
         ble?.stop(); ble = null
+        custom?.close(); custom = null
         kind = Kind.NONE
         setState("robot: off", false)
     }
@@ -154,6 +182,7 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
         val ok = when (kind) {
             Kind.WIFI -> ws?.send(s) ?: false
             Kind.BLE -> ble?.sendLine(s) ?: false
+            Kind.CUSTOM -> custom?.send(s) ?: false
             Kind.NONE -> false
         }
         if (ok) sent++
