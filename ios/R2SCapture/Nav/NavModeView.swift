@@ -81,11 +81,16 @@ struct NavARView: UIViewRepresentable {
         private let carrotNode = SCNNode()
         private var markerNodes: [SCNNode] = []
         private var pathVersion = -1
+        private let debugNode = SCNNode()
+        private let cliffNode = SCNNode()
+        private var debugVersion = -1
 
         init(engine: NavEngine) {
             self.engine = engine
             super.init()
             root.addChildNode(pathNode)
+            root.addChildNode(debugNode)
+            root.addChildNode(cliffNode)
             // Goal: a green pole with a ball on top.
             let pole = SCNNode(geometry: SCNCylinder(radius: 0.015, height: 0.6))
             pole.geometry?.firstMaterial?.diffuse.contents = UIColor.systemGreen
@@ -162,6 +167,11 @@ struct NavARView: UIViewRepresentable {
                     }
                 }
             }
+            if hud.debugVersion != debugVersion {
+                debugVersion = hud.debugVersion
+                debugNode.geometry = Coordinator.pointCloud(hud.debugObstacles, color: .systemRed)
+                cliffNode.geometry = Coordinator.pointCloud(hud.debugCliffs, color: .systemOrange)
+            }
             for (k, node) in markerNodes.enumerated() {
                 if k < hud.markers.count, let m = hud.markers[k], hud.sectors[k] < 1.5 {
                     node.isHidden = false
@@ -171,6 +181,21 @@ struct NavARView: UIViewRepresentable {
                     node.isHidden = true
                 }
             }
+        }
+
+        /// Screen-space dots at world points (the obstacle-point debug overlay).
+        static func pointCloud(_ pts: [SIMD3<Float>], color: UIColor) -> SCNGeometry? {
+            guard !pts.isEmpty else { return nil }
+            let src = SCNGeometrySource(vertices: pts.map { SCNVector3($0.x, $0.y, $0.z) })
+            let el = SCNGeometryElement(indices: (0..<Int32(pts.count)).map { $0 }, primitiveType: .point)
+            el.pointSize = 4
+            el.minimumPointScreenSpaceRadius = 2
+            el.maximumPointScreenSpaceRadius = 4
+            let g = SCNGeometry(sources: [src], elements: [el])
+            g.firstMaterial?.diffuse.contents = color
+            g.firstMaterial?.lightingModel = .constant
+            g.firstMaterial?.readsFromDepthBuffer = false
+            return g
         }
 
         static func segment(_ a: P2, _ b: P2, y: Float) -> SCNNode {
@@ -356,8 +381,10 @@ struct SensorStats: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(String(format: "%.0f fps · %@", hud.fps, hud.thermal))
-            Text("LiDAR \(hud.depthPoints) px · obst \(hud.obstaclePoints)")
+            Text("LiDAR \(hud.depthPoints) px · obst \(hud.obstaclePoints) · drop \(hud.cliffPoints)")
             Text(String(format: "cam %.2f m above floor%@", hud.cameraHeight, hud.floorFound ? "" : " (est.)"))
+            Text("floor: \(hud.floorSource)")
+            Text("front gap from: \(hud.frontSource)")
             Text("map \(hud.mapping)")
             if hud.pointingDown { Text("Point the back camera forward").foregroundStyle(.orange) }
         }
@@ -762,6 +789,7 @@ struct NavSettingsView: View {
                     Toggle("Voice instructions", isOn: $engine.settings.voice)
                     Toggle("Proximity beeps", isOn: $engine.settings.beeps)
                     Toggle("Haptics", isOn: $engine.settings.haptics)
+                    Toggle("Show obstacle points (red) and drops (orange)", isOn: $engine.settings.showObstaclePoints)
                     row("Minimap span", $engine.settings.minimapSpan, 2...30, 1, "m")
                 }
             }

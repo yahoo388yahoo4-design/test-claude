@@ -57,18 +57,25 @@ or just guides a person with arrows and voice.
   `worldmap.arworldmap` it relocalises into that map's coordinate frame, so the saved mesh, RoomPlan room
   and grid line up with the live view. Robot pose = the camera position on the floor plane, offset by the
   mount distance; heading = the camera's viewing direction projected on the floor.
-* **Floor:** the lowest horizontal ARKit plane classified as floor, else camera height minus the mount
-  height setting.
-* **Obstacles:** every 0.1 s the LiDAR depth (256×192, medium or high confidence, every third pixel) is
-  back-projected to 3D. Points 4 cm above the floor up to the robot height are obstacles, points well
-  below the floor (stairs down, holes) are obstacles too once the floor is known, floor points are free
-  space, and points inside the robot's own radius are ignored.
+* **Floor:** the lowest horizontal ARKit plane classified as floor (at least 10 cm below the camera),
+  else camera height minus the mount height setting. The estimate switches to the plane at once rather
+  than blending from the guess.
+* **Obstacles:** every 0.1 s the LiDAR depth (256×192, medium or high confidence, every third pixel,
+  20 cm to 5 m) is back-projected to 3D. Points 5 cm above the floor up to the robot height are
+  obstacles, points within 8 cm of the floor are free floor, and points inside the robot's own radius are
+  ignored. Points more than 15 cm below the floor count as a drop (stairs down, a hole) only after a floor
+  plane has been tracked for a second, and drops are never written into the map. A sector, or the
+  corridor ahead, needs at least 6 obstacle points, and the forward gap must show up in two consecutive
+  sweeps, so stray pixels cannot stop the robot. *Settings › Show obstacle points* draws the points counted
+  as obstacles (red) and drops (orange) in the camera view; the HUD shows where the floor height comes
+  from and whether the LiDAR or the map set the front gap.
 * **Map:** a 30 × 30 m log-odds occupancy grid at 5 cm. Each sweep ray-traces free space from the sensor
   to every point and marks hits; two consistent hits are needed before a cell counts as occupied. A
   static layer comes from the loaded map (mesh.ply faces that are not floor or ceiling, RoomPlan walls
   and objects below the robot height, a saved map.pgm), with RoomPlan doors and openings cut out of the
   walls. Fresh free-space evidence overrides the static layer, so furniture that moved does not block
-  forever.
+  forever. Map cells under the robot's footprint are cleared continuously (the robot is standing there),
+  and the map is only used for distances once the phone is localised in it.
 * **Planning:** A\* on the grid at 2 Hz, with cells closer than the robot radius forbidden, a soft
   cost band beyond that, a small penalty for unexplored cells, and line-of-sight smoothing. A goal inside
   an obstacle snaps to the nearest free spot within 1 m.
