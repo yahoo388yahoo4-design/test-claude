@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iPhone Dataset Capture</title>
+<style>
+:root{--bg:#f7f7f5;--fg:#1d1d1f;--muted:#5f6368;--card:#fff;--line:#e2e2de;--accent:#0b6e6e;--ok:#1a7f37;--warn:#9a6700;--code:#f0f0ec}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121416;--fg:#e8e8e6;--muted:#a0a4a8;--card:#1b1e21;--line:#2d3236;--accent:#4fc1c1;--ok:#56d364;--warn:#e3b341;--code:#22272b}}
+:root[data-theme="dark"]{--bg:#121416;--fg:#e8e8e6;--muted:#a0a4a8;--card:#1b1e21;--line:#2d3236;--accent:#4fc1c1;--ok:#56d364;--warn:#e3b341;--code:#22272b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:28px;margin:0 0 4px}h2{font-size:20px;margin:36px 0 10px}
+.sub{color:var(--muted);margin:0 0 20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.card b{display:block;margin-bottom:4px;color:var(--accent)}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{position:sticky;top:0;background:var(--card);font-weight:600}
+tr:last-child td{border-bottom:0}
+code{background:var(--code);padding:1px 5px;border-radius:5px;font-size:12.5px}
+pre{background:var(--code);padding:12px;border-radius:10px;overflow-x:auto;font-size:12.5px}
+.y{color:var(--ok);font-weight:600}.n{color:var(--muted)}.w{color:var(--warn);font-weight:600}
+a{color:var(--accent)}
+.note{border-left:3px solid var(--warn);padding:6px 12px;background:var(--card);border-radius:0 8px 8px 0}
+</style>
+</head>
+<body>
+<main>
+<h1>iPhone 17 Pro → ARKitScenes / LiteReality</h1>
+<p class="sub">How to capture these datasets with a phone: ready-made apps, our own capture app, and a converter
+tested against a real ARKitScenes episode. Full guide: <a href="README.md">README.md</a> · raw format:
+<a href="FORMAT.md">FORMAT.md</a> · install: <a href="ios/SIDELOAD.md">ios/SIDELOAD.md</a></p>
+
+<div class="cards">
+<div class="card"><b>LiteReality today</b>LiteReality app or 3D Scanner App (All Data + RoomPlan). No build needed.</div>
+<div class="card"><b>ARKitScenes-style today</b>Stray Scanner, then <code>tools/convert.py --to arkitscenes</code>.</div>
+<div class="card"><b>Richest data</b>R2S Capture (<code>ios/</code>): every frame, LiDAR, RoomPlan, IMU, GPS, barometer, extra cameras. Converts to both formats.</div>
+</div>
+
+<h2>Ready-made apps</h2>
+<div class="scroll"><table>
+<tr><th>App</th><th>Cost</th><th>RGB</th><th>Depth</th><th>Poses</th><th>Mesh</th><th>RoomPlan</th><th>IMU/GPS</th><th>Converter</th></tr>
+<tr><td>LiteReality</td><td>free</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td>3D Scanner layout</td></tr>
+<tr><td>3D Scanner App</td><td>free</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td class="y">✓</td></tr>
+<tr><td>Stray Scanner</td><td>free, OSS</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td class="n">–</td><td>IMU</td><td class="y">✓</td></tr>
+<tr><td>Record3D</td><td>export paid</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td class="n">–</td><td class="n">–</td><td class="n">–</td></tr>
+<tr><td>Polycam</td><td>Developer Mode</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td class="n">–</td></tr>
+<tr><td>NeRFCapture</td><td>free, OSS</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td class="n">–</td><td class="n">–</td><td class="n">–</td></tr>
+<tr><td>Spectacular Rec</td><td>free</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">–</td><td class="n">–</td><td>IMU</td><td class="n">–</td></tr>
+<tr><td>Scaniverse</td><td>free</td><td class="n">–</td><td class="n">–</td><td class="n">–</td><td class="y">✓</td><td class="n">–</td><td class="n">–</td><td class="n">–</td></tr>
+<tr><td><b>R2S Capture</b></td><td>free (sideload)</td><td class="y">✓ 60 fps / 4K</td><td class="y">✓ raw+smooth</td><td class="y">✓</td><td class="y">✓ classes</td><td class="y">✓</td><td class="y">✓ all</td><td class="y">✓</td></tr>
+</table></div>
+
+<h2>R2S Capture modes</h2>
+<div class="scroll"><table>
+<tr><th>Mode</th><th>Records</th><th>Becomes</th></tr>
+<tr><td>A · RGB-D + poses</td><td>HEVC of every ARFrame (1920×1440@60 or 4K@30), K, pose, exposure, ISO, LiDAR depth + confidence (raw + smoothed), classified mesh, planes, world map, stills, audio, all sensors</td><td>ARKitScenes (+ LiteReality w/o RoomPlan)</td></tr>
+<tr><td>B · RGB-D + RoomPlan</td><td>A + <code>room.usdz</code>, CapturedRoom JSON, simplified objects / walls / doors / windows</td><td>LiteReality + ARKitScenes with 3D boxes</td></tr>
+<tr><td>C · Multi-camera + LiDAR</td><td>LiDAR depth camera + ultrawide + tele (+ front) at once, dense AVFoundation depth with calibration, extrinsics, all sensors. No ARKit poses.</td><td>poses via <code>recover_poses.py</code>, then ultrawide / vga / extras</td></tr>
+</table></div>
+
+<h2>What was verified (fleet-3090, ARKitScenes episode 40753679)</h2>
+<div class="scroll"><table>
+<tr><th>Check</th><th>Result</th></tr>
+<tr><td>Round trip ARKitScenes → raw → ARKitScenes: traj timestamps</td><td class="y">560 / 560</td></tr>
+<tr><td>Pose error vs Apple's traj</td><td class="y">≤ 2.7e-6° · ≤ 4e-6 mm</td></tr>
+<tr><td>RGB / depth / confidence / intrinsics / mesh / 3D boxes</td><td class="y">identical</td></tr>
+<tr><td>Mesh colouring by projection vs Faro colours</td><td>92% coloured, MAE 12/255 (54 shuffled)</td></tr>
+<tr><td>metadata.csv row</td><td class="y">identical to Apple's</td></tr>
+<tr><td>sky_direction from gravity</td><td>7 / 10 match (Apple's 3 "Down" labels describe upright images)</td></tr>
+<tr><td>Mode C SfM (640×480, 3 fps)</td><td class="w">2.7 cm RMSE, but only 48/168 frames register (low-texture room)</td></tr>
+<tr><td>Mode C RGB-D odometry</td><td class="w">~5% drift over 20 s; 0.8 m over the full 56 s</td></tr>
+<tr><td>iOS app compile / run</td><td class="w">not yet (first GitHub Actions run is the compile check)</td></tr>
+</table></div>
+
+<h2>Commands</h2>
+<pre>python tools/convert.py SESSION --to arkitscenes litereality --out OUT
+python tools/validate.py OUT/arkitscenes/&lt;video_id&gt;
+python tools/receiver.py --root ~/captures --port 8765 --token SECRET --convert ~/converted
+python tools/recover_poses.py MODE_C_SESSION --method sfm --out SESSION_posed
+python tools/roundtrip_test.py ARKITSCENES_EPISODE --work /tmp/rt</pre>
+
+<p class="note">Not possible with a phone: ARKitScenes' Faro laser ground truth (<code>highres_depth</code>, laser point clouds),
+and recording the ultrawide / tele / front cameras at the same time as ARKit poses.</p>
+</main>
+</body>
+</html>
