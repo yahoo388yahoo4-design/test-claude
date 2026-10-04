@@ -61,6 +61,8 @@ final class VideoWriter {
     /// Copies `source` into a buffer we own (so ARKit's capture pool is never starved), then appends it.
     @discardableResult
     func append(copying source: CVPixelBuffer, seconds: TimeInterval) -> Bool {
+        // AVAssetWriter throws an uncatchable exception if used after it failed (e.g. encoder busy).
+        guard writer.status == .writing else { framesDropped += 1; return false }
         let time = CMTime(seconds: seconds, preferredTimescale: 1_000_000)
         if !started {
             writer.startSession(atSourceTime: time)
@@ -77,6 +79,8 @@ final class VideoWriter {
     /// Appends an already-owned video sample buffer (AVFoundation outputs).
     @discardableResult
     func append(sampleBuffer: CMSampleBuffer) -> Bool {
+        // AVAssetWriter throws an uncatchable exception if used after it failed (e.g. encoder busy).
+        guard writer.status == .writing else { framesDropped += 1; return false }
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if !started {
             writer.startSession(atSourceTime: time)
@@ -89,13 +93,14 @@ final class VideoWriter {
     }
 
     func appendAudio(_ sampleBuffer: CMSampleBuffer) {
-        guard started, let a = audioInput, a.isReadyForMoreMediaData else { return }
+        guard started, writer.status == .writing, let a = audioInput, a.isReadyForMoreMediaData else { return }
         a.append(sampleBuffer)
     }
 
     func finish(_ completion: @escaping () -> Void) {
-        guard started else {
-            writer.cancelWriting()
+        guard started, writer.status == .writing else {
+            if writer.status == .writing { writer.cancelWriting() }
+            if let e = writer.error { NSLog("VideoWriter failed: \(e)") }
             completion()
             return
         }

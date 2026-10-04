@@ -151,7 +151,9 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         session.addConnection(conn)
         if conn.isCameraIntrinsicMatrixDeliverySupported { conn.isCameraIntrinsicMatrixDeliveryEnabled = true }
         if conn.isVideoStabilizationSupported { conn.preferredVideoStabilizationMode = .off }
-        streams.append(Stream(name: streamName(device), device: device, output: out, port: port))
+        var name = streamName(device)
+        if streams.contains(where: { $0.name == name }) { name += "_\(streams.count)" }
+        streams.append(Stream(name: name, device: device, output: out, port: port))
 
         if isLiDAR, let dport = input.ports(for: .depthData, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position).first {
             let dout = AVCaptureDepthDataOutput()
@@ -227,7 +229,7 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     func frameCounts() -> [String: Int] {
         queue.sync {
-            var d = Dictionary(uniqueKeysWithValues: streams.map { ($0.name, $0.count) })
+            var d = Dictionary(streams.map { ($0.name, $0.count) }, uniquingKeysWith: +)
             if depthOutput != nil { d["lidar_depth"] = depthCount }
             return d
         }
