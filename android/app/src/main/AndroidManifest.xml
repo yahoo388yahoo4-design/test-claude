@@ -65,5 +65,13 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:keepScreenOn="true" />
+        <activity
+            android:name=".SessionsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".SessionViewerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="false"
+            android:keepScreenOn="true" />
     </application>
 </manifest>

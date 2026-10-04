@@ -61,6 +61,10 @@ class MainActivity : AppCompatActivity() {
             if (writer != null) { status("stop recording first"); return@setOnClickListener }
             startActivity(android.content.Intent(this, NavActivity::class.java))
         }
+        findViewById<Button>(R.id.btnSessions).setOnClickListener {
+            if (writer != null) { status("stop recording first"); return@setOnClickListener }
+            startActivity(android.content.Intent(this, SessionsActivity::class.java))
+        }
         findViewById<Button>(R.id.btnUpload).setOnClickListener {
             val base = url.text.toString()
             prefs.edit().putString("upload_url", base).apply()
@@ -148,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         wake = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "capture:rec").apply { acquire(3 * 3600 * 1000L) }
         btnRecord.text = "Stop"
         modeSpinner.isEnabled = false
+        findViewById<Button>(R.id.btnSessions).isEnabled = false
     }
 
     private fun abort() {
@@ -172,6 +177,7 @@ class MainActivity : AppCompatActivity() {
         lastSession = w.dir
         wake?.let { if (it.isHeld) it.release() }; wake = null
         btnRecord.text = "Record"; btnRecord.isEnabled = true; modeSpinner.isEnabled = true
+        findViewById<Button>(R.id.btnSessions).isEnabled = true
         status("saved ${w.dir.name}\n$sum")
     }
 
