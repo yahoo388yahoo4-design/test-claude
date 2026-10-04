@@ -98,29 +98,35 @@ Options (checkboxes):
 ### Navigation mode (phone on a robot)
 
 The **Navigate** button opens a separate screen for driving a two-wheeled robot with the phone as its
-only sensor. The receiver that runs on the robot and the shared protocol (same as the iPhone app)
-are in [`robot/`](../robot/README.md).
+only sensor. It talks to the robot with the same protocol as the iPhone app
+([`robot/PROTOCOL.md`](../robot/PROTOCOL.md)), so the same receivers work with both phones:
+`robot/receiver.py` (Python: sim, serial, Raspberry Pi GPIO), `robot/esp32_diffdrive` (ESP32 with Wi-Fi
+and BLE) and `robot/serial_motor` (Arduino bridge). See [`NAVIGATION.md`](../NAVIGATION.md).
 
 1. **Map.** Walk or drive around; ARCore depth builds a 5 cm occupancy grid and a point cloud. Or press
    **Load map** to bring back a map saved by mode A or by an earlier navigation run, then **Align**
    (scan matching of the live map against the saved one) or **Same start** (you started where the
    saved map started).
 2. **Goal.** Tap the top-down map, or tap the floor in the camera view. A* plans a path that keeps the
-   robot radius (default 20 cm) away from obstacles and replans every 0.5 s as the map changes.
-3. **Guidance.** The path and goal are drawn in 3D and on the map; a big arrow and text give the next
-   instruction ("turn left 40 degrees", "go straight 1.2 metres"), spoken aloud (Voice) with parking
-   style beeps as obstacles get closer than 1.2 m (Beeps).
-4. **Drive.** Connect to the robot (`192.168.1.20`, or `192.168.1.20?token=abc`) and switch on
-   **Auto-drive**: the phone sends `vel` commands at 10 Hz (pure pursuit), slows near obstacles,
-   stops when something is within 15 cm of the robot's front or ARCore tracking is lost, and says
-   "Goal reached". **STOP** latches an e-stop on the robot until **Reset e-stop**.
-5. **Manual commands.** "Move X cm at V cm/s" and "Turn A° at W°/s", with the phone measuring how far
-   it actually moved and turned.
+   robot radius away from obstacles and replans every 0.5 s as the map changes.
+3. **Guide / Auto / Manual.** *Guide*: arrow, text and voice ("turn left 40 degrees", "go straight
+   1.2 meters"), parking-style beeps under 1.2 m and haptics; nothing is sent to the robot. *Auto*: the
+   phone drives the robot along the path with `vel` commands at 10 Hz, slows between the slow and stop
+   distances, backs up when blocked for 3 s and the way behind is clear, and says "Goal reached".
+   *Manual*: an on-screen joystick (with the same front safety stop).
+4. **Moves and turns.** "▲ Fwd / ▼ Back X cm at V cm/s" and "⟲ Left / Right ⟳ A° at W°/s". With
+   *Moves closed-loop (ARCore)* on (default) the phone measures the motion and streams velocities, so a
+   robot without encoders still moves the right distance; off, `move` / `turn` go to the robot as is.
+5. **Link.** None, Wi-Fi (`ws://192.168.4.1:8777/robot` for the ESP32 access point, or the URL
+   `receiver.py` prints) or Bluetooth LE UART (device name prefix `R2S-Robot`). **STOP** stops at once,
+   **E-stop latch** / **Release** latch the robot's emergency stop, and an `estop` from the robot (bumper,
+   button) cancels whatever the phone was doing. Tracking loss also stops the robot.
 
-The HUD shows phone and robot speed on a dial, distances front / left / right with bars, the polar
-virtual lidar, robot link state, round-trip time and battery, map size and tracking state.
-Settings: phone mount height, robot radius, obstacle height, max speed. Each run logs
-`nav/<time>/nav.jsonl` (pose, command, distances at 5 Hz).
+The HUD shows phone and robot speed on a dial, distances front / left / right / rear with bars, the
+polar virtual lidar, the command being sent, robot link state, round-trip time, battery and wheel
+speeds, map size and tracking state. Settings (saved): phone mount height and how far ahead of the
+turning centre it sits, robot radius and height, max speed and turn rate, slow / stop distances, goal
+tolerance. Each run logs `nav/<time>/nav.jsonl` (pose, command, distances at 5 Hz).
 
 ## 3. Capture tips (13 Ultra)
 

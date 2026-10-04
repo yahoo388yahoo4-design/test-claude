@@ -59,7 +59,8 @@ import kotlin.math.min
  *  - Obstacles: a "virtual lidar" (nearest obstacle per 5 degrees) from the newest depth map plus the
  *    map; front / left / right distances, colour-coded, with a parking-sensor beep.
  *  - Guidance: arrow + text + speech ("turn left 30 degrees", "go straight 1.5 meters").
- *  - Robot: optional WebSocket link (robot/PROTOCOL.md). Auto-drive streams velocity commands from pure
+ *  - Robot: Wi-Fi WebSocket or BLE UART link, same protocol as the iPhone app (robot/PROTOCOL.md). Guide /
+ *    Auto / Manual (joystick) drive modes. Auto streams velocity commands from pure
  *    pursuit, slowing down near obstacles and stopping inside the stop distance or when tracking is lost.
  *    Manual "move X cm at V cm/s" and "turn A deg" commands, with the phone measuring the actual motion.
  */
@@ -73,7 +74,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var map = MapBuilder()
     private lateinit var cloud: PointCloudRenderer
     private var saved: MapBuilder? = null
-    private val link = RobotLink { msg -> status(msg) }
+    private lateinit var link: RobotLink
     private lateinit var guide: Guidance
     private val exec = Executors.newSingleThreadExecutor()
     private val taps = ConcurrentLinkedQueue<FloatArray>()
@@ -84,7 +85,28 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     @Volatile private var robotHeight = 0.50f
     @Volatile private var vMax = 0.25f
     @Volatile private var wMax = Math.toRadians(60.0).toFloat()
-    @Volatile private var autoDrive = false
+    @Volatile private var mountForward = 0f          // camera ahead of the robot's turning centre (m)
+    @Volatile private var stopDist = 0.25f           // forward gap from the robot's edge
+    @Volatile private var slowDist = 0.60f
+    @Volatile private var goalTol = 0.15f
+    @Volatile private var closedLoopMoves = true     // move/turn: phone measures with ARCore and streams vel
+    @Volatile private var haptics = true
+    enum class Drive { GUIDE, AUTO, MANUAL }
+    @Volatile private var drive = Drive.GUIDE
+
+    /** What the robot is doing besides following the path. */
+    private sealed class Task {
+        object Idle : Task()
+        class Joy(val v: Float, val w: Float, val at: Long) : Task()
+        class Move(val sx: Float, val sz: Float, val h: Float, val dist: Float, val speed: Float, val began: Long) : Task()
+        class Turn(var lastH: Float, var turned: Float, val target: Float, val rate: Float, val began: Long) : Task()
+        class Backup(val until: Long) : Task()
+    }
+    @Volatile private var task: Task = Task.Idle
+    private var stopSent = true
+    private var lastCmd = floatArrayOf(0f, 0f)
+    private var lastWarnMs = 0L
+    private var blockedSince = 0L
 
     // state
     @Volatile private var goal: FloatArray? = null
@@ -105,6 +127,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private val viewM = FloatArray(16); private val projM = FloatArray(16); private val vp = FloatArray(16)
     private val scan = FloatArray(72)
     private var manual: FloatArray? = null        // start x, z, heading, target (cm or deg), kind (0 move, 1 turn)
+    private var vibrator: android.os.Vibrator? = null
     private var log: BufferedWriter? = null
     private var lastLogMs = 0L
 
@@ -114,6 +137,9 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         guide = Guidance(this)
+        link = RobotLink(this) { msg -> status(msg) }
+        link.onMessage = { m -> if (m.optString("type") == "estop") { task = Task.Idle; guide.say("Robot emergency stop", force = true); buzz(300) } }
+        vibrator = getSystemService(android.os.Vibrator::class.java)
         cloud = PointCloudRenderer(map)
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         gl = GLSurfaceView(this).apply {
@@ -131,6 +157,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         root.addView(mapView, FrameLayout.LayoutParams(side, side).apply { gravity = Gravity.TOP or Gravity.END; topMargin = dp(8); rightMargin = dp(8) })
         mapView.onTap = { x, z -> setGoal(x, z, "map") }
         root.addView(controls(), FrameLayout.LayoutParams(-1, -2).apply { gravity = Gravity.BOTTOM; bottomMargin = 0 })
+        joyView?.let { root.addView(it, FrameLayout.LayoutParams(dp(170), dp(170)).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL; leftMargin = dp(10) }) }
         setContentView(root)
         gl.setOnTouchListener { v, e ->
             if (e.action == MotionEvent.ACTION_UP) { taps.add(floatArrayOf(e.x, e.y)); v.performClick() }
@@ -155,68 +182,141 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             addView(LinearLayout(this@NavActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; v.forEach { addView(it) } })
         }
         val prefs = getSharedPreferences("nav", Context.MODE_PRIVATE)
+        fun pf(k: String, d: Float) = prefs.getFloat(k, d)
+        mountHeight = pf("mount", mountHeight); mountForward = pf("mountFwd", mountForward); robotRadius = pf("radius", robotRadius)
+        robotHeight = pf("height", robotHeight); vMax = pf("vmax", vMax); wMax = pf("wmax", wMax)
+        stopDist = pf("stop", stopDist); slowDist = pf("slow", slowDist); goalTol = pf("goalTol", goalTol)
+        closedLoopMoves = prefs.getBoolean("closedLoop", true); haptics = prefs.getBoolean("haptics", true)
+
+        val kinds = arrayOf("None (guide only)", "Wi-Fi (WebSocket)", "Bluetooth LE (UART)")
+        val linkKind = android.widget.Spinner(this).apply {
+            adapter = android.widget.ArrayAdapter(this@NavActivity, android.R.layout.simple_spinner_dropdown_item, kinds)
+            setSelection(prefs.getInt("linkKind", 1)); setBackgroundColor(Color.LTGRAY)
+        }
         val url = EditText(this).apply {
-            hint = "robot ip[:8766]"; setText(prefs.getString("robot", "")); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
-            width = dp(170); inputType = InputType.TYPE_TEXT_VARIATION_URI
+            hint = "ws://192.168.4.1:8777/robot"; setText(prefs.getString("wsUrl", "ws://192.168.4.1:8777/robot")); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
+            width = dp(200); inputType = InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val bleName = EditText(this).apply {
+            hint = "BLE name"; setText(prefs.getString("bleName", "R2S-Robot")); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); width = dp(110)
         }
         val connect = btn("Connect") {
-            prefs.edit().putString("robot", url.text.toString()).apply()
-            if (link.connected) link.close() else if (url.text.isNotBlank()) link.connect(url.text.toString())
+            val k = RobotLink.Kind.values()[linkKind.selectedItemPosition]
+            prefs.edit().putInt("linkKind", linkKind.selectedItemPosition).putString("wsUrl", url.text.toString()).putString("bleName", bleName.text.toString()).apply()
+            if (k == RobotLink.Kind.BLE && !hasBlePermission()) { requestBlePermission(); return@btn }
+            link.connect(k, url.text.toString(), bleName.text.toString())
         }
-        val estop = btn("STOP", Color.rgb(200, 30, 30)) {
-            autoDrive = false; autoBox?.isChecked = false
-            link.estop(); guide.say("Stopped", force = true)
+        val disconnect = btn("Disconnect") { link.disconnect() }
+        val stop = btn("STOP", Color.rgb(200, 30, 30)) { stopAll("Stopped") }
+        val estopOn = btn("E-stop latch") { stopAll("Emergency stop"); link.estop(true) }
+        val estopOff = btn("Release") { link.estop(false) }
+
+        val modes = android.widget.RadioGroup(this).apply { orientation = LinearLayout.HORIZONTAL }
+        Drive.values().forEach { d ->
+            modes.addView(android.widget.RadioButton(this).apply {
+                id = View.generateViewId(); text = d.name.lowercase().replaceFirstChar { it.uppercase() }; setTextColor(Color.WHITE); tag = d
+                isChecked = d == drive
+            })
         }
-        val reset = btn("Reset e-stop") { link.reset() }
-        val auto = CheckBox(this).apply {
-            text = "Auto-drive"; setTextColor(Color.WHITE)
-            setOnCheckedChangeListener { _, c -> autoDrive = c; if (!c) link.stop(); guide.say(if (c) "Auto drive on" else "Auto drive off", force = true) }
+        val joy = JoystickView(this).apply { visibility = View.GONE }
+        joy.onChange = { f, l -> task = if (f == 0f && l == 0f) Task.Idle else Task.Joy(f * vMax, l * wMax, SystemClock.elapsedRealtime()) }
+        modes.setOnCheckedChangeListener { g, id ->
+            drive = g.findViewById<View>(id).tag as Drive
+            task = Task.Idle; sendStop()
+            joy.visibility = if (drive == Drive.MANUAL) View.VISIBLE else View.GONE
+            guide.say("${drive.name.lowercase()} mode", force = true)
         }
-        autoBox = auto
         val voice = CheckBox(this).apply { text = "Voice"; isChecked = true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> guide.voice = c } }
         val beeps = CheckBox(this).apply { text = "Beeps"; isChecked = true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> guide.beeps = c } }
+        val hapt = CheckBox(this).apply { text = "Haptics"; isChecked = haptics; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> haptics = c; prefs.edit().putBoolean("haptics", c).apply() } }
         val points = CheckBox(this).apply { text = "3D points"; isChecked = true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> cloud.visible = c } }
+        val closed = CheckBox(this).apply {
+            text = "Moves closed-loop (ARCore)"; isChecked = closedLoopMoves; setTextColor(Color.WHITE)
+            setOnCheckedChangeListener { _, c -> closedLoopMoves = c; prefs.edit().putBoolean("closedLoop", c).apply() }
+        }
 
         val dist = num("cm", "50"); val spd = num("cm/s", "15"); val ang = num("deg", "90"); val tspd = num("deg/s", "45")
-        val move = btn("Move") {
-            val d = dist.text.toString().toFloatOrNull() ?: return@btn; val v = spd.text.toString().toFloatOrNull() ?: return@btn
-            lastPose?.let { manual = floatArrayOf(it[0], it[1], it[2], d, 0f) }
-            if (link.connected) link.move(d, v) else status("robot not connected (measuring phone motion only)")
-            guide.say("Moving ${d.toInt()} centimeters", force = true)
+        fun doMove(sign: Float) {
+            val d = sign * (dist.text.toString().toFloatOrNull() ?: return); val v = spd.text.toString().toFloatOrNull() ?: return
+            val lp = lastPose
+            lp?.let { manual = floatArrayOf(it[0], it[1], it[2], d, 0f) }
+            if (!closedLoopMoves) { if (!link.move(d, v)) status("robot not connected (measuring phone motion only)") }
+            else if (lp != null) task = Task.Move(lp[0], lp[1], lp[2], d / 100, v / 100, SystemClock.elapsedRealtime())
+            guide.say("Moving ${if (d < 0) "back " else ""}${abs(d).toInt()} centimeters", force = true)
         }
-        val turn = btn("Turn") {
-            val a = ang.text.toString().toFloatOrNull() ?: return@btn; val w = tspd.text.toString().toFloatOrNull() ?: return@btn
-            lastPose?.let { manual = floatArrayOf(it[0], it[1], it[2], a, 1f) }
-            if (link.connected) link.turn(a, w) else status("robot not connected (measuring phone motion only)")
+        fun doTurn(sign: Float) {
+            val a = sign * (ang.text.toString().toFloatOrNull() ?: return); val w = tspd.text.toString().toFloatOrNull() ?: return
+            val lp = lastPose
+            lp?.let { manual = floatArrayOf(it[0], it[1], it[2], a, 1f) }
+            if (!closedLoopMoves) { if (!link.turn(a, w)) status("robot not connected (measuring phone motion only)") }
+            else if (lp != null) task = Task.Turn(lp[2], 0f, Math.toRadians(a.toDouble()).toFloat(), Math.toRadians(w.toDouble()).toFloat(), SystemClock.elapsedRealtime())
             guide.say("Turning ${if (a > 0) "left" else "right"} ${abs(a).toInt()} degrees", force = true)
         }
-        val mount = num("mount cm", "${(mountHeight * 100).toInt()}"); val rad = num("radius cm", "${(robotRadius * 100).toInt()}")
-        val rh = num("height cm", "${(robotHeight * 100).toInt()}"); val vm = num("max cm/s", "${(vMax * 100).toInt()}")
+        val fields = linkedMapOf(
+            "mount" to num("mount cm", "${(mountHeight * 100).toInt()}"), "fwd" to num("fwd cm", "${(mountForward * 100).toInt()}"),
+            "radius" to num("radius cm", "${(robotRadius * 100).toInt()}"), "height" to num("height cm", "${(robotHeight * 100).toInt()}"),
+            "vmax" to num("cm/s", "${(vMax * 100).toInt()}"), "wmax" to num("deg/s", "${Math.toDegrees(wMax.toDouble()).toInt()}"),
+            "slow" to num("slow cm", "${(slowDist * 100).toInt()}"), "stop" to num("stop cm", "${(stopDist * 100).toInt()}"),
+            "goal" to num("goal cm", "${(goalTol * 100).toInt()}"))
         val apply = btn("Apply") {
-            mount.text.toString().toFloatOrNull()?.let { mountHeight = it / 100 }
-            rad.text.toString().toFloatOrNull()?.let { robotRadius = it / 100 }
-            rh.text.toString().toFloatOrNull()?.let { robotHeight = it / 100; map.maxObstacleHeight = robotHeight + 0.1f }
-            vm.text.toString().toFloatOrNull()?.let { vMax = it / 100 }
+            fun v(k: String) = fields[k]!!.text.toString().toFloatOrNull()
+            v("mount")?.let { mountHeight = it / 100 }; v("fwd")?.let { mountForward = it / 100 }
+            v("radius")?.let { robotRadius = it / 100 }; v("height")?.let { robotHeight = it / 100; map.maxObstacleHeight = robotHeight + 0.1f }
+            v("vmax")?.let { vMax = it / 100 }; v("wmax")?.let { wMax = Math.toRadians(it.toDouble()).toFloat() }
+            v("stop")?.let { stopDist = it / 100 }; v("slow")?.let { slowDist = maxOf(it / 100, stopDist + 0.05f) }; v("goal")?.let { goalTol = it / 100 }
+            prefs.edit().putFloat("mount", mountHeight).putFloat("mountFwd", mountForward).putFloat("radius", robotRadius).putFloat("height", robotHeight)
+                .putFloat("vmax", vMax).putFloat("wmax", wMax).putFloat("stop", stopDist).putFloat("slow", slowDist).putFloat("goalTol", goalTol).apply()
             path = null; lastPlanMs = 0
-            status("params: mount ${(mountHeight * 100).toInt()} cm, radius ${(robotRadius * 100).toInt()} cm, height ${(robotHeight * 100).toInt()} cm, vmax ${(vMax * 100).toInt()} cm/s")
+            status("params: mount ${(mountHeight * 100).toInt()} cm (fwd ${(mountForward * 100).toInt()}), radius ${(robotRadius * 100).toInt()} cm, height ${(robotHeight * 100).toInt()} cm, " +
+                "vmax ${(vMax * 100).toInt()} cm/s, slow/stop ${(slowDist * 100).toInt()}/${(stopDist * 100).toInt()} cm")
         }
         map.maxObstacleHeight = robotHeight + 0.1f
 
         statusView = TextView(this).apply { setTextColor(Color.rgb(0, 255, 120)); textSize = 11f; typeface = android.graphics.Typeface.MONOSPACE }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.argb(170, 0, 0, 0)); setPadding(dp(6), dp(4), dp(6), dp(4))
-            addView(row(url, connect, estop, reset))
+            addView(row(stop, modes, estopOn, estopOff))
+            addView(row(linkKind, url, bleName, connect, disconnect))
             addView(row(btn("Load map") { loadMap() }, btn("Align") { align() }, btn("Same start") { mergeSameStart() },
-                btn("Save map") { saveMap() }, btn("Clear goal") { goal = null; path = null; mapView.goal = null; mapView.path = null; link.stop() },
+                btn("Save map") { saveMap() }, btn("Clear goal") { goal = null; path = null; mapView.goal = null; mapView.path = null; sendStop() },
                 btn("New map") { resetMap() }))
-            addView(row(auto, voice, beeps, points))
-            addView(row(lab("move"), dist, lab("at"), spd, move, lab("  turn"), ang, lab("at"), tspd, turn))
-            addView(row(lab("mount"), mount, lab("radius"), rad, lab("height"), rh, lab("vmax"), vm, apply))
+            addView(row(voice, beeps, hapt, points, closed))
+            addView(row(lab("move"), dist, lab("at"), spd, btn("▲ Fwd") { doMove(1f) }, btn("▼ Back") { doMove(-1f) },
+                lab("  turn"), ang, lab("at"), tspd, btn("⟲ Left") { doTurn(1f) }, btn("Right ⟳") { doTurn(-1f) }))
+            addView(row(*fields.flatMap { (k, e) -> listOf(lab(k), e) }.toTypedArray(), apply))
             addView(statusView)
         }
-        return ScrollView(this).apply { addView(panel); isFillViewport = false; layoutParams = ViewGroup.LayoutParams(-1, -2) }
+        val wrap = FrameLayout(this)
+        wrap.addView(ScrollView(this).apply { addView(panel); isFillViewport = false }, FrameLayout.LayoutParams(-1, -2).apply { gravity = Gravity.BOTTOM })
+        joyView = joy
+        return wrap.also { it.layoutParams = ViewGroup.LayoutParams(-1, -2) }
     }
-    private var autoBox: CheckBox? = null
+    private var joyView: JoystickView? = null
+
+    private fun stopAll(say: String) {
+        task = Task.Idle
+        if (drive == Drive.AUTO) { goal = null; path = null; mapView.goal = null; mapView.path = null }
+        link.stop(); stopSent = true
+        guide.say(say, force = true); buzz(120)
+    }
+
+    private fun sendStop() { link.stop(); stopSent = true }
+
+    private fun buzz(ms: Long) {
+        if (!haptics) return
+        try { vibrator?.vibrate(android.os.VibrationEffect.createOneShot(ms, android.os.VibrationEffect.DEFAULT_AMPLITUDE)) } catch (_: Exception) {}
+    }
+
+    private fun blePerms() = if (android.os.Build.VERSION.SDK_INT >= 31)
+        arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+    else arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+
+    private fun hasBlePermission() = blePerms().all { checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED }
+
+    private fun requestBlePermission() {
+        status("allow Bluetooth access, then press Connect again")
+        requestPermissions(blePerms(), 7)
+    }
 
     private fun status(s: String) = runOnUiThread { statusView.text = s }
 
@@ -299,14 +399,14 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     override fun onPause() {
         link.stop()
-        autoDrive = false
+        task = Task.Idle
         gl.onPause()
         session?.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
-        link.close()
+        link.disconnect()
         guide.shutdown()
         session?.close(); session = null
         log?.close()
@@ -360,7 +460,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         if (!tracking) {
             if (trackingWasOk) {
                 trackingWasOk = false
-                if (link.connected) link.stop()
+                task = Task.Idle; sendStop(); buzz(300)
                 guide.say("Tracking lost, stopping", force = true)
             }
             if (now - lastHudMs > 200) {
@@ -402,13 +502,15 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         lastPose = floatArrayOf(x, z, heading, tS)
 
+        // robot turning centre (the phone may sit ahead of or behind it)
+        val rx = x - mountForward * kotlin.math.cos(heading); val rz = z - mountForward * kotlin.math.sin(heading)
         map.scan(x, z, heading, frame.timestamp, scan)
         fun minIn(fromDeg: Int, toDeg: Int): Float {
             var r = Float.POSITIVE_INFINITY
             for (deg in fromDeg..toDeg step 5) r = min(r, scan[((deg / 5) % 72 + 72) % 72])
             return r
         }
-        val front = minIn(-25, 25); val left = minIn(30, 120); val right = minIn(-120, -30)
+        val front = minIn(-25, 25); val left = minIn(30, 120); val right = minIn(-120, -30); val rear = minIn(155, 205)
         // obstacles closer than the robot body radius are the robot itself / noise: report distance to the body edge
         val frontClear = front - robotRadius * 0.5f
         guide.obstacle(frontClear)
@@ -420,7 +522,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val grid = synchronized(map) { Planner.Grid(map.occCopy(), map.size, map.res, map.originX, map.originZ) }
             exec.execute {
                 try {
-                    val p = Planner.plan(grid, x, z, gl0[0], gl0[1], robotRadius)
+                    val p = Planner.plan(grid, rx, rz, gl0[0], gl0[1], robotRadius)
                     if (goal === gl0) {
                         path = p
                         runOnUiThread { mapView.path = p }
@@ -432,21 +534,67 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         // following + robot commands
         var cmd: Planner.Cmd? = null
+        var out = floatArrayOf(0f, 0f)               // v m/s, w rad/s sent to the robot
+        var state = ""
         val p = path
         if (p != null && p.size >= 2) {
-            cmd = Planner.follow(p, x, z, heading, frontClear, vMax, wMax, stopDist = 0.15f, slowDist = 0.6f)
+            cmd = Planner.follow(p, rx, rz, heading, frontClear, vMax, wMax, stopDist = stopDist, slowDist = slowDist, goalTol = goalTol)
             if (cmd.arrived) {
-                if (!arrivedSaid) { arrivedSaid = true; guide.say("Goal reached", force = true); if (link.connected) link.stop() }
+                if (!arrivedSaid) { arrivedSaid = true; guide.say("Goal reached", force = true); buzz(200); task = Task.Idle }
+                blockedSince = 0L
             } else {
                 arrivedSaid = false
                 if (cmd.blocked) guide.say("Obstacle ahead, ${guide.meters(frontClear.coerceAtLeast(0f))}")
                 else guide.say(guide.instruction(cmd.bearing, cmd.remaining))
-                if (autoDrive && link.connected && now - lastVelMs > 100) {
-                    lastVelMs = now
-                    link.vel(cmd.v * 100, Math.toDegrees(cmd.w.toDouble()).toFloat())
+                if (drive == Drive.AUTO && task === Task.Idle) {
+                    out = floatArrayOf(cmd.v, cmd.w)
+                    // blocked for 3 s: back up a little if the way behind is clear, then replan
+                    if (cmd.blocked) {
+                        if (blockedSince == 0L) blockedSince = now
+                        else if (now - blockedSince > 3000 && rear > 0.35f) { task = Task.Backup(now + 1200); blockedSince = 0L; lastPlanMs = 0; guide.say("Backing up", force = true) }
+                        state = "Blocked"
+                    } else blockedSince = 0L
                 }
             }
         }
+        fun safety(v: Float, w: Float): FloatArray {
+            if (v <= 0f) return floatArrayOf(v, w)
+            val k = if (frontClear <= stopDist) 0f else if (frontClear >= slowDist) 1f else (frontClear - stopDist) / (slowDist - stopDist)
+            return floatArrayOf(v * k.coerceIn(0f, 1f), w)
+        }
+        fun wrap(a: Float): Float { var r = a; while (r > Math.PI) r -= (2 * Math.PI).toFloat(); while (r < -Math.PI) r += (2 * Math.PI).toFloat(); return r }
+        when (val t = task) {
+            is Task.Idle -> {}
+            is Task.Joy -> if (now - t.at > 500 && t.v == 0f && t.w == 0f) task = Task.Idle else out = safety(t.v, t.w)
+            is Task.Backup -> if (now < t.until && rear > 0.1f) out = floatArrayOf(-0.08f, 0f) else task = Task.Idle
+            is Task.Move -> {
+                val travelled = (rx - t.sx) * kotlin.math.cos(t.h) + (rz - t.sz) * kotlin.math.sin(t.h)
+                val remaining = abs(t.dist) - abs(travelled)
+                if (remaining <= 0.01f || now - t.began > (abs(t.dist) / maxOf(0.02f, t.speed) * 3 + 3) * 1000) {
+                    task = Task.Idle; guide.say("Done", force = true)
+                } else {
+                    val v = (if (t.dist < 0) -1f else 1f) * minOf(t.speed, maxOf(0.05f, 1.5f * remaining))
+                    val w = (2f * wrap(heading - t.h)).coerceIn(-0.5f, 0.5f)     // hold the start heading (heading grows clockwise)
+                    out = safety(v, w)
+                    if (t.dist > 0 && out[0] == 0f) state = "Blocked"
+                }
+            }
+            is Task.Turn -> {
+                t.turned += wrap(t.lastH - heading); t.lastH = heading                  // CCW positive
+                val remaining = abs(t.target) - abs(t.turned)
+                if (remaining <= Math.toRadians(1.5).toFloat() || now - t.began > (abs(t.target) / maxOf(0.1f, t.rate) * 3 + 3) * 1000) {
+                    task = Task.Idle; guide.say("Done", force = true)
+                } else out = floatArrayOf(0f, (if (t.target < 0) -1f else 1f) * minOf(t.rate, maxOf(Math.toRadians(12.0).toFloat(), 2f * remaining)))
+            }
+        }
+        if (drive == Drive.GUIDE && task !is Task.Move && task !is Task.Turn) out = floatArrayOf(0f, 0f)
+        lastCmd = out
+        if (link.connected) {
+            if (out[0] != 0f || out[1] != 0f) {
+                if (now - lastVelMs >= 100) { lastVelMs = now; link.vel(out[0], out[1]); stopSent = false }
+            } else if (!stopSent) sendStop()
+        }
+        if (frontClear < stopDist + 0.05f && (out[0] > 0f || speed > 0.05f) && now - lastWarnMs > 3000) { lastWarnMs = now; buzz(150) }
 
         // manual command progress measured by the phone
         val man = manual
@@ -468,17 +616,17 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             lastHudMs = now
             Matrix.multiplyMM(vp, 0, projM, 0, viewM, 0)
             val floor = if (map.floorY.isNaN()) m[13] - mountHeight else map.floorY
-            val odom = link.odom
             val st = HudView.State().apply {
                 nav = true
                 speed = this@NavActivity.speed; vMax = this@NavActivity.vMax
-                robotSpeed = if (odom != null && now - link.odomRxMs < 1000) odom[3] / 100f else Float.NaN
+                robotSpeed = if (now - link.statusRxMs < 1000) link.robotV else Float.NaN
                 this.scan = this@NavActivity.scan.copyOf()
                 this.front = frontClear; this.left = left; this.right = right
                 if (cmd != null && !cmd.arrived) { bearing = cmd.bearing; instruction = if (cmd.blocked) "Obstacle ${fmtM(frontClear)}" else guide.instruction(cmd.bearing, cmd.remaining) }
                 if (cmd?.arrived == true) { banner = "GOAL REACHED"; bannerColor = Color.rgb(30, 160, 60) }
                 else if (cmd?.blocked == true) { banner = "BLOCKED  ${fmtM(frontClear)}"; bannerColor = Color.rgb(210, 40, 30) }
-                else if (link.estopLatched) { banner = "E-STOP (press Reset e-stop)"; bannerColor = Color.rgb(210, 40, 30) }
+                else if (link.robotEstop) { banner = "E-STOP (press Release)"; bannerColor = Color.rgb(210, 40, 30) }
+                else if (state.isNotEmpty()) { banner = state.uppercase(); bannerColor = Color.rgb(210, 40, 30) }
                 pathPx = p?.let { project(it, floor) }
                 goalPx = goal?.let { g -> project(listOf(g), floor + 0.3f) }
                 lines = listOfNotNull(
@@ -486,9 +634,9 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     "pos (%.2f, %.2f) m  hdg %.0f  walked %.1f m".format(x, z, Math.toDegrees(-heading.toDouble()), map.travelled),
                     "speed %.0f cm/s  front %s  L %s  R %s".format(speed * 100, fmtM(frontClear), fmtM(left), fmtM(right)),
                     goal?.let { gg -> "goal %.2f m away, path %s".format(hypot(gg[0] - x, gg[1] - z), p?.let { "%.2f m".format(Planner.length(it)) } ?: "planning...") },
-                    if (cmd != null && !cmd.arrived) "cmd v %.0f cm/s  w %.0f deg/s  %s".format(cmd.v * 100, Math.toDegrees(cmd.w.toDouble()), if (autoDrive) "AUTO" else "guide only") else null,
-                    "robot: ${link.state.name.lowercase()}" + (if (link.connected) "  rtt %.0f ms".format(link.rttMs) + (if (!link.batteryV.isNaN()) "  bat %.1f V".format(link.batteryV) else "") else ""),
-                    odom?.let { o -> "odom (%.0f, %.0f) cm  %.0f deg  v %.0f cm/s".format(o[0], o[1], o[2], o[3]) },
+                    "${drive.name}  sent v %.0f cm/s  w %.0f deg/s  rear %s".format(lastCmd[0] * 100, Math.toDegrees(lastCmd[1].toDouble()), fmtM(rear)),
+                    link.statusLine(),
+                    if (link.robotV.isFinite() && now - link.statusRxMs < 1000) "robot v %.0f cm/s  w %.0f deg/s".format(link.robotV * 100, Math.toDegrees(link.robotW.toDouble())) else null,
                     manualText.ifEmpty { null },
                 )
             }
@@ -510,7 +658,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     .put("speed", speed.toDouble()).put("front", if (frontClear.isFinite()) frontClear.toDouble() else -1.0)
                     .put("goal", goal?.let { JSONArray(listOf(it[0].toDouble(), it[1].toDouble())) } ?: JSONObject.NULL)
                     .put("cmd", cmd?.let { JSONArray(listOf(it.v.toDouble(), it.w.toDouble())) } ?: JSONObject.NULL)
-                    .put("auto", autoDrive).put("robot", link.state.name)
+                    .put("sent", JSONArray(listOf(lastCmd[0].toDouble(), lastCmd[1].toDouble())))
+                    .put("drive", drive.name).put("robot", link.stateText)
                 exec.execute { try { w.write(o.toString()); w.write("\n") } catch (_: Exception) {} }
             }
         }

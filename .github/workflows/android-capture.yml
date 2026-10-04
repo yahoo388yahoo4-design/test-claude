@@ -56,10 +56,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Robot receiver tests (sim backend over a real WebSocket)
+      - name: Robot receiver end-to-end test (sim backend; same receiver the iPhone app uses)
         run: |
-          pip install websockets pytest
-          cd robot && python -m pytest -q test_receiver.py
+          pip install websockets
+          python robot/test_receiver.py
 
   reader:
     runs-on: ubuntu-latest
