@@ -72,12 +72,12 @@ sudo apt install usbmuxd libimobiledevice-utils unzip curl
 mkdir -p ~/sideloader && cd ~/sideloader
 curl -LO https://github.com/Dadoum/Sideloader/releases/download/1.0-pre4/sideloader-cli-x86_64-linux-gnu.zip
 unzip -o sideloader-cli-x86_64-linux-gnu.zip
-chmod +x sideloader*
+chmod +x sideloader-cli-x86_64-linux-gnu
 idevicepair pair                                    # after tapping Trust on the phone; should print SUCCESS
-./sideloader-cli* install ~/Downloads/R2SCapture-unsigned.ipa -i   # -i asks for Apple ID and password
+./sideloader-cli-x86_64-linux-gnu install ~/Downloads/R2SCapture-unsigned.ipa -i   # -i asks for Apple ID and password
 ```
 
-If the unzipped binary has a different name, run `ls ~/sideloader` and use that name. A GTK window
+The zip also contains a `.dbg` debug file; ignore it and run the binary by its exact name. A GTK window
 version also exists (`sudo apt install libgtk-4-1 libadwaita-1-0`, then the same steps with
 `sideloader-gtk-x86_64-linux-gnu.zip`), but the CLI is the simpler one.
 
