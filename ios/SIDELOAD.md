@@ -60,10 +60,18 @@ flatpak install --user flathub dev.khcrysalis.PlumeImpactor
 flatpak run dev.khcrysalis.PlumeImpactor
 ```
 
+No flatpak? Use the AppImage from <https://github.com/claration/Impactor/releases> (v2.6.5):
+
+```bash
+sudo apt install libfuse2t64                        # AppImages need FUSE 2 on Ubuntu 24.04+
+curl -LO https://github.com/claration/Impactor/releases/download/v2.6.5/Impactor-linux-x86_64.appimage
+chmod +x Impactor-linux-x86_64.appimage && ./Impactor-linux-x86_64.appimage
+```
+
 Plug in the iPhone, unlock it and tap **Trust**, then check the link with `idevicepair pair` (should print
 SUCCESS). Open Plume Impactor, sign in with your Apple ID, pick `R2SCapture-unsigned.ipa` and install.
 
-**Command line: Dadoum's Sideloader** (<https://github.com/Dadoum/Sideloader>, latest release 1.0-pre4).
+**Command line: Dadoum's Sideloader** (crashed with a segfault at "Logging in..." on Ubuntu 26.04 for us; use Plume Impactor if it does) (<https://github.com/Dadoum/Sideloader>, latest release 1.0-pre4).
 Works on Ubuntu 24.04/26.04 (x86_64). On an ARM machine swap `x86_64` for `aarch64` in the file name.
 
 ```bash
