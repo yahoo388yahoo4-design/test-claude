@@ -37,6 +37,7 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private(set) var configured = false
     private(set) var summary = "not configured"
     var previewPort: AVCaptureInput.Port? { streams.first?.port }
+    private weak var previewLayer: AVCaptureVideoPreviewLayer?
     var bitrate = 30_000_000
 
     static var isSupported: Bool { AVCaptureMultiCamSession.isMultiCamSupported }
@@ -46,6 +47,7 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     func configure(includeFront: Bool) {
         guard !configured, MultiCamRecorder.isSupported else {
             if !MultiCamRecorder.isSupported { summary = "multi-camera capture not supported on this device" }
+            connectPreview()
             return
         }
         var types: [AVCaptureDevice.DeviceType] = [.builtInLiDARDepthCamera, .builtInWideAngleCamera,
@@ -76,6 +78,7 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
         session.commitConfiguration()
         configured = true
+        connectPreview()
         let names = streams.map { $0.name } + (depthOutput != nil ? ["lidar_depth"] : [])
         summary = "streams: \(names.joined(separator: ", ")) · hw cost \(String(format: "%.2f", session.hardwareCost))"
         if session.hardwareCost > 1.0 {
@@ -172,6 +175,27 @@ final class MultiCamRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 }
             }
         }
+    }
+
+    /// The preview view can appear before or after `configure`, so whichever comes second makes the
+    /// connection from the first (main) camera to the layer.
+    func attachPreview(_ layer: AVCaptureVideoPreviewLayer) {
+        previewLayer = layer
+        connectPreview()
+    }
+
+    private func connectPreview() {
+        guard let layer = previewLayer, layer.connection == nil, let port = previewPort else { return }
+        if layer.session !== session { layer.setSessionWithNoConnection(session) }
+        let conn = AVCaptureConnection(inputPort: port, videoPreviewLayer: layer)
+        session.beginConfiguration()
+        if session.canAddConnection(conn) {
+            session.addConnection(conn)
+            if conn.isVideoRotationAngleSupported(90) { conn.videoRotationAngle = 90 }  // app is portrait-only
+        } else {
+            summary += " (no preview: over the camera budget)"
+        }
+        session.commitConfiguration()
     }
 
     func startRunning() {

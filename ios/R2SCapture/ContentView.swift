@@ -110,18 +110,12 @@ struct MultiCamPreview: UIViewRepresentable {
     let recorder: MultiCamRecorder
     func makeUIView(context: Context) -> PreviewHostView {
         let v = PreviewHostView()
-        v.previewLayer.setSessionWithNoConnection(recorder.session)
         v.previewLayer.videoGravity = .resizeAspectFill
-        connect(v)
+        recorder.attachPreview(v.previewLayer)
         return v
     }
     func updateUIView(_ uiView: PreviewHostView, context: Context) {
-        if uiView.previewLayer.connection == nil { connect(uiView) }
-    }
-    private func connect(_ v: PreviewHostView) {
-        guard let port = recorder.previewPort else { return }
-        let conn = AVCaptureConnection(inputPort: port, videoPreviewLayer: v.previewLayer)
-        if recorder.session.canAddConnection(conn) { recorder.session.addConnection(conn) }
+        recorder.attachPreview(uiView.previewLayer)
     }
 }
 
