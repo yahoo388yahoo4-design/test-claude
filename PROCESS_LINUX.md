@@ -8,10 +8,23 @@ Works for Mode A (RGB-D) and Mode B (RGB-D + RoomPlan) sessions. Tested formats:
 cd ~
 git clone https://github.com/yahoo388yahoo4-design/test-claude r2s-capture
 python3 -m venv ~/r2s-venv
-~/r2s-venv/bin/pip install numpy opencv-python scipy
+~/r2s-venv/bin/pip install numpy opencv-python scipy pymobiledevice3
+sudo apt install usbmuxd
 ```
 
 ## 2. Copy sessions off the phone
+
+**Quickest: one command over USB (nothing to tap in the app).** Plug in the iPhone, unlock it, then:
+
+```bash
+cd ~/r2s-capture && git pull                    # get the latest tools
+~/r2s-venv/bin/python ~/r2s-capture/tools/pull_iphone.py --convert ~/converted
+```
+
+It finds the app on the phone, copies every finished session that isn't already in `~/captures`, and
+converts each new one into `~/converted/<session>/` (ARKitScenes + LiteReality). Leave out `--convert` to
+only copy. Other options: `--list` (show what's on the phone), `--session NAME`, `--dest DIR`. Re-running
+is safe and resumes an interrupted copy. First time only: tap **Trust** on the phone when asked.
 
 **Option A: Wi-Fi (phone and computer on the same network).** On the computer:
 
