@@ -266,7 +266,7 @@ class SessionViewerActivity : AppCompatActivity() {
             val ref = refs[k]
             depthExec.execute {
                 val mm = Depth.load(blob, ref)
-                val bmp = mm?.let { Bitmap.createBitmap(Depth.colorize(it), ref.w, ref.h, Bitmap.Config.ARGB_8888) }
+                val bmp = mm?.let { Bitmap.createBitmap(Depth.colorizeFiltered(blob, ref, it), ref.w, ref.h, Bitmap.Config.ARGB_8888) }
                 val med = mm?.let { Depth.medianMm(it) } ?: 0
                 runOnUiThread {
                     busy = false
@@ -443,6 +443,7 @@ class SessionViewerActivity : AppCompatActivity() {
         col.addView(legend)
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         row.addView(button("Reset view") { sv.resetView() })
+        row.addView(button("Colours") { sv.toggleColors() })
         row.addView(text("Drag to orbit, pinch to zoom, two fingers to pan.", 11f))
         col.addView(row)
         io.execute {
@@ -457,7 +458,7 @@ class SessionViewerActivity : AppCompatActivity() {
                     else -> "${d.plyFile!!.relativeTo(d.dir).path}: ${ply.vertexCount} points"
                 }
                 legend.text = "$what · ${traj.size / 3} trajectory points\nyellow: trajectory   red: camera   " +
-                    (if (ply?.rgb != null) "PLY colours" else "colour by height (blue floor → red 2 m)")
+                    "colour by height (blue floor → red 2 m)" + (if (ply?.rgb != null) " · Colours: PLY / camera colours" else "")
             }
         }
         val update = {
@@ -662,7 +663,7 @@ class ViewerData(
 
             val mapDir = File(dir, "extras/map").takeIf { File(it, "map.json").isFile && File(it, "occupancy.bin").isFile }
                 ?: File(dir, "extras/map").takeIf { File(it, "occupancy.png").isFile }
-            val ply = listOf("mesh.ply", "extras/map/points.ply").map { File(dir, it) }.firstOrNull { it.isFile && it.length() > 0 }
+            val ply = listOf("mesh.ply", "extras/recon/mesh.ply", "extras/map/points.ply").map { File(dir, it) }.firstOrNull { it.isFile && it.length() > 0 }
             val traj: FloatArray = if (frames.poses.isNotEmpty()) {
                 FloatArray(frames.poses.size * 3).also { a -> frames.poses.forEachIndexed { k, p -> a[k * 3] = p.x().toFloat(); a[k * 3 + 1] = p.y().toFloat(); a[k * 3 + 2] = p.z().toFloat() } }
             } else {

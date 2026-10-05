@@ -187,11 +187,11 @@ class MainActivity : AppCompatActivity() {
     private fun addLiveViews(r: ArRecorder) {
         val h = HudView(this)
         previewHost.addView(h, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply { topMargin = dp(150) })
-        val mv = MapView(this).apply { title = "captured so far (long-press: 3D points on/off)" }
+        val mv = MapView(this).apply { title = "captured so far (long-press: mesh / depth / off)" }
         val side = (resources.displayMetrics.widthPixels * 0.42f).toInt()
         previewHost.addView(mv, FrameLayout.LayoutParams(side, side).apply {
             gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = dp(160); rightMargin = dp(8) })
-        mv.setOnLongClickListener { r.showCloud = !r.showCloud; true }
+        mv.setOnLongClickListener { r.cycleLiveView(); true }
         hud = h; mapView = mv
         ui.postDelayed(liveTick, 500)
     }

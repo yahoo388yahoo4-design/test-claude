@@ -177,8 +177,9 @@ class SessionDataTest {
         assertEquals(0, c[0])                                     // no depth -> transparent
         assertEquals(0xff, c[1] ushr 24)                          // opaque
         assertEquals(c[6], c[7])                                  // clamped beyond 5 m
-        assertTrue((c[1] shr 16 and 0xff) > 200 && (c[1] and 0xff) == 0)   // near is red
-        assertEquals(0x00007f, c[6] and 0xffffff)                 // far is dark blue (same palette as iOS)
+        assertTrue((c[1] shr 16 and 0xff) > 150 && (c[1] and 0xff) < 60)   // near is red (turbo)
+        assertTrue((c[6] and 0xff) > 2 * (c[6] shr 16 and 0xff))         // far is blue (turbo)
+        assertEquals(DepthViz.color(9f, 5f), c[7])
         assertEquals(3000, Depth.medianMm(mm))
     }
 

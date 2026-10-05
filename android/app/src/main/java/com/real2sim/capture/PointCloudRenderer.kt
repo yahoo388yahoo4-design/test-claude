@@ -7,11 +7,16 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Draws the accumulated map point cloud over the camera image, coloured by height above the floor
- * (blue near the floor -> green -> red at 2 m), plus optional line strips (planned path) on the floor.
- * Re-uploads the cloud only when the map changed and at most every [uploadMs].
+ * Draws what has been reconstructed over the camera image: the live TSDF mesh from [liveMesh] (lit,
+ * coloured by height above the floor: blue near the floor -> green -> red at 2 m, semi-transparent), or,
+ * until there is a mesh / without fusion, the map's filtered depth points; plus optional line strips
+ * (planned path) on the floor. Re-uploads only when the data changed and at most every [uploadMs].
  */
-class PointCloudRenderer(private val map: MapBuilder, private val uploadMs: Long = 400) {
+class PointCloudRenderer(
+    private val map: MapBuilder,
+    private val uploadMs: Long = 400,
+    private val liveMesh: () -> DepthFusion.LiveMesh? = { null },
+) {
     private var program = 0
     private var aPos = 0
     private var uMvp = 0
@@ -27,6 +32,17 @@ class PointCloudRenderer(private val map: MapBuilder, private val uploadMs: Long
     private var fb: FloatBuffer = ByteBuffer.allocateDirect(map.maxPoints * 12).order(ByteOrder.nativeOrder()).asFloatBuffer()
     private val mvp = FloatArray(16)
     @Volatile var visible = true
+
+    // live mesh
+    private var meshProgram = 0
+    private var mPos = 0; private var mNrm = 0; private var mMvp = 0; private var mFloor = 0; private var mAlpha = 0
+    private var meshVbo = 0
+    private var meshBuf: FloatBuffer = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+    private var meshVerts = 0
+    private var meshVersion = -1
+    private var lastMeshUpload = 0L
+    /** Opacity of the live mesh over the camera image. */
+    @Volatile var meshAlpha = 0.7f
 
     fun create() {
         program = link(
@@ -49,13 +65,69 @@ class PointCloudRenderer(private val map: MapBuilder, private val uploadMs: Long
         uColor = GLES20.glGetUniformLocation(program, "u_Color")
         uMode = GLES20.glGetUniformLocation(program, "u_Mode")
         uSize = GLES20.glGetUniformLocation(program, "u_Size")
-        val b = IntArray(1); GLES20.glGenBuffers(1, b, 0); vbo = b[0]
+        meshProgram = link(
+            """
+            uniform mat4 u_Mvp; uniform float u_Floor; attribute vec3 a_Pos; attribute vec3 a_Nrm; varying float v_H; varying float v_L;
+            void main() {
+              gl_Position = u_Mvp * vec4(a_Pos, 1.0); v_H = a_Pos.y - u_Floor;
+              vec3 n = normalize(a_Nrm + vec3(1e-6));
+              v_L = 0.35 + 0.5 * abs(dot(n, normalize(vec3(0.3, 1.0, 0.5)))) + 0.2 * abs(dot(n, normalize(vec3(-0.6, 0.2, -0.7))));
+            }
+            """.trimIndent(),
+            """
+            precision mediump float; varying float v_H; varying float v_L; uniform float u_Alpha;
+            void main() {
+              float h = clamp(v_H / 2.0, 0.0, 1.0);
+              vec3 c = h < 0.5 ? mix(vec3(0.1, 0.4, 1.0), vec3(0.1, 1.0, 0.4), h * 2.0) : mix(vec3(0.1, 1.0, 0.4), vec3(1.0, 0.25, 0.2), (h - 0.5) * 2.0);
+              gl_FragColor = vec4(c * v_L, u_Alpha);
+            }
+            """.trimIndent())
+        mPos = GLES20.glGetAttribLocation(meshProgram, "a_Pos")
+        mNrm = GLES20.glGetAttribLocation(meshProgram, "a_Nrm")
+        mMvp = GLES20.glGetUniformLocation(meshProgram, "u_Mvp")
+        mFloor = GLES20.glGetUniformLocation(meshProgram, "u_Floor")
+        mAlpha = GLES20.glGetUniformLocation(meshProgram, "u_Alpha")
+        val b = IntArray(2); GLES20.glGenBuffers(2, b, 0); vbo = b[0]; meshVbo = b[1]
+        meshVersion = -1; meshVerts = 0; uploadedVersion = -1
+    }
+
+    /** Uploads a newer live mesh (rate limited); true when a mesh is ready to draw. */
+    private fun syncMesh(now: Long): Boolean {
+        val m = liveMesh()
+        if (m != null && m.version != meshVersion && now - lastMeshUpload > uploadMs) {
+            if (meshBuf.capacity() < m.soup.size) meshBuf = ByteBuffer.allocateDirect(m.soup.size * 4 * 5 / 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+            val buf = meshBuf
+            buf.clear(); buf.put(m.soup); buf.position(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, meshVbo)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, m.soup.size * 4, buf, GLES20.GL_DYNAMIC_DRAW)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+            meshVerts = m.triangles * 3; meshVersion = m.version; lastMeshUpload = now
+        }
+        return meshVerts > 0
+    }
+
+    private fun drawMesh(floor: Float) {
+        GLES20.glUseProgram(meshProgram)
+        GLES20.glUniformMatrix4fv(mMvp, 1, false, mvp, 0)
+        GLES20.glUniform1f(mFloor, floor)
+        GLES20.glUniform1f(mAlpha, meshAlpha)
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDepthMask(true)
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, meshVbo)
+        GLES20.glVertexAttribPointer(mPos, 3, GLES20.GL_FLOAT, false, 24, 0)
+        GLES20.glVertexAttribPointer(mNrm, 3, GLES20.GL_FLOAT, false, 24, 12)
+        GLES20.glEnableVertexAttribArray(mPos); GLES20.glEnableVertexAttribArray(mNrm)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, meshVerts)
+        GLES20.glDisableVertexAttribArray(mPos); GLES20.glDisableVertexAttribArray(mNrm)
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
     }
 
     fun draw(view: FloatArray, proj: FloatArray, path: List<FloatArray>?, goal: FloatArray?) {
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0)
         val now = android.os.SystemClock.elapsedRealtime()
-        if (visible && map.version != uploadedVersion && now - lastUpload > uploadMs) {
+        val hasMesh = visible && syncMesh(now)
+        if (visible && !hasMesh && map.version != uploadedVersion && now - lastUpload > uploadMs) {
             count = map.copyPoints(scratch)
             fb.position(0); fb.put(scratch, 0, count * 3); fb.position(0)
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
@@ -64,12 +136,15 @@ class PointCloudRenderer(private val map: MapBuilder, private val uploadMs: Long
             uploadedVersion = map.version; lastUpload = now
         }
         val floor = if (map.floorY.isNaN()) -1.4f else map.floorY
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        if (hasMesh) drawMesh(floor)
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
         GLES20.glUniform1f(uFloor, floor)
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        if (visible && count > 0) {
+        if (visible && !hasMesh && count > 0) {
             GLES20.glUniform1i(uMode, 0); GLES20.glUniform1f(uSize, 5f)
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
             GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0)
