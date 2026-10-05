@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         modeControl.onSelect = { i -> settings.mode = CaptureMode.values()[i]; modeChanged() }
         modeChanged()
 
-        btnRecord.setOnClickListener { if (writer == null) startRecording() else stopRecording() }
+        btnRecord.setOnClickListener { if (stopping) return@setOnClickListener; if (writer == null) startRecording() else stopRecording() }
         findViewById<View>(R.id.btnSettings).setOnClickListener {
             if (writer != null) { status("stop recording first"); return@setOnClickListener }
             showSettings()
@@ -90,8 +90,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Live camera while idle (like iOS); the recorders get the camera only after it is released. */
+    @Volatile private var stopping = false
+
     private fun startPreview() {
-        if (writer != null || isFinishing) return
+        if (writer != null || stopping || isFinishing) return
         idle.start(settings.mode)
         findViewById<View>(R.id.idleHint).visibility = if (idle.running) View.GONE else View.VISIBLE
     }
@@ -271,18 +273,28 @@ class MainActivity : AppCompatActivity() {
         ui.removeCallbacks(liveTick)
         mapView?.let { previewHost.removeView(it) }; mapView = null
         coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
-        ar?.let { it.stop(); previewHost.removeView(it.view) }; ar = null
-        cam2?.let { it.stop(); previewHost.removeView(it.previewView) }; cam2 = null
-        val sum = sensors?.summary() ?: ""
-        sensors?.stop(); sensors = null
-        w.finish()
-        writer = null
-        lastSession = w.dir
-        wake?.let { if (it.isHeld) it.release() }; wake = null
-        btnRecord.isEnabled = true
-        setRecordingUi(false)
-        if (!notResumed()) startPreview()
-        status("Saved ${w.dir.name}\n$sum")
+        // Stopping writes the final mesh / map and can take seconds on a big room: do it off the UI thread.
+        val r = ar; val c = cam2; val sn = sensors
+        ar = null; cam2 = null; sensors = null; writer = null; stopping = true
+        status("stopping… building the 3D mesh")
+        Thread {
+            try { r?.stop() } catch (e: Exception) { android.util.Log.e("MainActivity", "ar stop", e) }
+            try { c?.stop() } catch (e: Exception) { android.util.Log.e("MainActivity", "cam2 stop", e) }
+            val sum = sn?.summary() ?: ""
+            try { sn?.stop() } catch (_: Exception) {}
+            try { w.finish() } catch (e: Exception) { android.util.Log.e("MainActivity", "finish", e) }
+            ui.post {
+                stopping = false
+                r?.let { previewHost.removeView(it.view) }
+                c?.let { previewHost.removeView(it.previewView) }
+                lastSession = w.dir
+                wake?.let { if (it.isHeld) it.release() }; wake = null
+                btnRecord.isEnabled = true
+                setRecordingUi(false)
+                if (!notResumed()) startPreview()
+                status("Saved ${w.dir.name}\n$sum")
+            }
+        }.apply { name = "stop-recording" }.start()
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -290,13 +302,13 @@ class MainActivity : AppCompatActivity() {
     /** Mode A live view: 3D points are drawn by ArRecorder; here the top-down map, and the stats in the status card. */
     private fun addLiveViews(r: ArRecorder) {
         val mv = MapView(this).apply {
-            title = "captured so far (long-press: 3D points)"
+            title = "captured so far (long-press: mesh / depth / off)"
             background = Ui.material(this@MainActivity, 12f); clipToOutline = true
         }
         val side = (resources.displayMetrics.widthPixels * 0.42f).toInt()
         previewHost.addView(mv, FrameLayout.LayoutParams(side, side).apply {
             gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = topBar.bottom + dp(8); rightMargin = dp(16) })
-        mv.setOnLongClickListener { r.showCloud = !r.showCloud; true }
+        mv.setOnLongClickListener { r.cycleLiveView(); true }
         mapView = mv
         ui.postDelayed(liveTick, 500)
     }

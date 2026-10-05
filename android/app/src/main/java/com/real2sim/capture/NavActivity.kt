@@ -71,6 +71,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var session: Session? = null
     private val bg = BackgroundRenderer()
     private var map = MapBuilder()
+    /** Depth filter + occupancy + live TSDF mesh, off the GL thread. */
+    private var fusion = DepthFusion(map)
     private lateinit var cloud: PointCloudRenderer
     private var saved: MapBuilder? = null
     private lateinit var link: RobotLink
@@ -140,7 +142,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         link = RobotLink(this) { msg -> status(msg) }
         link.onMessage = { m -> if (m.optString("type") == "estop") { task = Task.Idle; guide.say("Robot emergency stop", force = true); buzz(300) } }
         vibrator = getSystemService(android.os.Vibrator::class.java)
-        cloud = PointCloudRenderer(map)
+        cloud = PointCloudRenderer(map) { fusion.liveMesh }
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         gl = GLSurfaceView(this).apply {
             preserveEGLContextOnPause = true
@@ -692,7 +694,9 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         goal = null; path = null
         gl.queueEvent {
             map = MapBuilder().also { it.maxObstacleHeight = robotHeight + 0.1f }
-            cloud = PointCloudRenderer(map).also { it.create() }
+            fusion.close()
+            fusion = DepthFusion(map)
+            cloud = PointCloudRenderer(map) { fusion.liveMesh }.also { it.create() }
         }
         status("new empty map")
     }
@@ -731,6 +735,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         link.disconnect()
         guide.shutdown()
         session?.close(); session = null
+        fusion.close()
         log?.close()
         super.onDestroy()
     }
@@ -801,16 +806,18 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         map.addPose(x, m[13], z, frame.timestamp)
         if (frames % 30 == 0) updateFloor(s, m[13])
 
-        // depth -> map + virtual lidar
+        // depth -> DepthFusion worker: filter -> map + virtual lidar (+ live mesh). Dense smoothed depth keeps
+        // textureless walls as obstacles.
         try {
             frame.acquireDepthImage16Bits().use { d ->
                 if (d.timestamp != lastDepthTs) {
                     lastDepthTs = d.timestamp
                     val k = cam.imageIntrinsics
-                    val sx = d.width.toFloat() / k.imageDimensions[0]; val sy = d.height.toFloat() / k.imageDimensions[1]
                     val p = d.planes[0]
-                    map.integrateDepth(p.buffer, d.width, d.height, p.rowStride, k.focalLength[0] * sx, k.focalLength[1] * sy,
-                        k.principalPoint[0] * sx, k.principalPoint[1] * sy, m, heading, d.timestamp)
+                    val mm = DepthFilter.shortsLE(SessionWriter.packPlane(p.buffer, d.width, d.height, p.rowStride, 2, p.pixelStride.coerceAtLeast(2)), d.width * d.height)
+                    fusion.submit(DepthFusion.Frame(null, null, 0, 0, mm, d.width, d.height,
+                        floatArrayOf(k.focalLength[0], k.focalLength[1], k.principalPoint[0], k.principalPoint[1]),
+                        k.imageDimensions[0], k.imageDimensions[1], m, d.timestamp))
                     depthMaps++
                 }
             }

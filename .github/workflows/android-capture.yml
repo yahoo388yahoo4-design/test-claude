@@ -4,9 +4,9 @@ name: android-capture
 
 on:
   push:
-    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
+    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", "tools/depth_filter*.py", "tools/convert.py", ".github/workflows/android-capture.yml"]
   pull_request:
-    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
+    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", "tools/depth_filter*.py", "tools/convert.py", ".github/workflows/android-capture.yml"]
   workflow_dispatch:
 
 jobs:
@@ -74,3 +74,7 @@ jobs:
         run: |
           pip install numpy opencv-python-headless scipy pillow
           cd tools && python -c "import readers; assert 'android' in readers.READERS, readers.READERS; print('android reader registered')"
+      - name: Depth filter tests (same rules as the app)
+        run: |
+          pip install numpy
+          python tools/depth_filter_test.py

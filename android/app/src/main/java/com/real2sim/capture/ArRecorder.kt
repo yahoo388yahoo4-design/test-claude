@@ -96,13 +96,25 @@ class ArRecorder(
 
     // Live view: map of what has been captured (3D points over the camera image + top-down map).
     val map = MapBuilder()
-    private val cloud = PointCloudRenderer(map)
+    /** Filter -> occupancy + TSDF fusion of the depth maps, off the GL thread. */
+    val fusion = DepthFusion(map)
+    private val cloud = PointCloudRenderer(map) { fusion.liveMesh }
+    private val depthOverlay = DepthOverlayRenderer { fusion.liveDepth }
+    /** Live view: 0 = mesh, 1 = mesh + filtered depth, 2 = filtered depth, 3 = camera only. */
+    @Volatile var liveView = 0
+    fun cycleLiveView() { liveView = (liveView + 1) % 4 }
+    private var latestRgb: IntArray? = null
+    private var latestRgbT = 0L
+    private var latestRgbW = 0
+    private var latestRgbH = 0
+    private var lastRawSubmitT = 0L
     private val viewM = FloatArray(16)
     private val projM = FloatArray(16)
     private var lastK = floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f)   // fx, fy, cx, cy, w, h of the CPU image
     private var lastPoseM = FloatArray(16)
     private var lastHeading = 0f
     @Volatile var showCloud = true
+        set(v) { field = v; liveView = if (v) 0 else 3 }
 
     // Shared camera (hi-res stills)
     private var shared: SharedCamera? = null
@@ -241,10 +253,24 @@ class ArRecorder(
             put("lock", opt.lockFocus); put("geospatial", opt.geospatial)
         })
         dumpPlanesFinal()
+        // final TSDF mesh + cleaned points (extras/recon/), settings + stats in session.json
+        var clean: FloatArray? = null
+        try {
+            val r = fusion.finish(map.floorY)
+            if (r != null) {
+                fusion.writeOutputs(r, s.file("extras/recon/recon.json").parentFile!!)
+                clean = r.points
+            }
+            s.meta.put("depth_processing", fusion.describe(r).apply {
+                put("outputs_dir", "extras/recon/")
+                put("note", "depth filtered (confidence, range, edge-preserving median, flying pixels, grazing angle, temporal) " +
+                    "before occupancy and TSDF fusion; extras/map/points.ply = cleaned TSDF surface points")
+            })
+        } catch (e: Exception) { Log.w(TAG, "recon", e) }
         try {
             val extra = JSONObject().put("session", s.id).put("source", "mode A capture")
-            map.save(s.file("extras/map/map.json").parentFile!!, extra)
-            map.save(File(SessionWriter.sessionsRoot(activity).parentFile, "maps/${s.id}"), extra)
+            map.save(s.file("extras/map/map.json").parentFile!!, extra, clean)
+            map.save(File(SessionWriter.sessionsRoot(activity).parentFile, "maps/${s.id}"), extra, clean)
         } catch (e: Exception) { Log.w(TAG, "map save", e) }
         session.close()
     }
@@ -254,6 +280,7 @@ class ArRecorder(
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         bg.create()
         cloud.create()
+        depthOverlay.create()
         session.setCameraTextureName(bg.textureId)
         if (opt.hiResStills && shared == null) activity.runOnUiThread { try { openSharedCamera() } catch (e: Exception) { status("shared camera failed: $e") } }
     }
@@ -275,7 +302,9 @@ class ArRecorder(
         if (frame.camera.trackingState == TrackingState.TRACKING) {
             frame.camera.getViewMatrix(viewM, 0)
             frame.camera.getProjectionMatrix(projM, 0, 0.05f, 50f)
-            cloud.visible = showCloud
+            val lv = liveView
+            if (lv == 1 || lv == 2) depthOverlay.draw(frame)
+            cloud.visible = lv <= 1
             cloud.draw(viewM, projM, null, null)
         }
     }
@@ -303,6 +332,14 @@ class ArRecorder(
             frame.acquireCameraImage().use { img ->
                 o.put("t_image", img.timestamp / 1e9)
                 inVideo = encoder?.encodeYuv(img, tNs) == true
+                // small RGB at depth resolution for colouring the TSDF (~3 times a second is plenty)
+                if (frameIdx % 10 == 0) try {
+                    val (dw, dh) = depthDims ?: Pair(160, 120)
+                    val y = img.planes[0]; val u = img.planes[1]; val v = img.planes[2]
+                    latestRgb = YuvSampler.sample(y.buffer, y.rowStride, y.pixelStride, u.buffer, v.buffer, u.rowStride, u.pixelStride,
+                        img.width, img.height, dw, dh)
+                    latestRgbT = tNs; latestRgbW = dw; latestRgbH = dh
+                } catch (_: Exception) {}
             }
         } catch (_: NotYetAvailableException) {
         } catch (e: Exception) { Log.w(TAG, "cpu image", e) }
@@ -398,17 +435,22 @@ class ArRecorder(
     }
 
     private fun depth(frame: Frame, o: JSONObject) {
+        var rawSub: Triple<ShortArray, Int, Int>? = null
+        var confSub: ByteArray? = null
+        var smSub: Triple<ShortArray, Int, Int>? = null
         // Raw depth + per-pixel confidence (0..255) -> depth.zlib.bin / conf.zlib.bin (0..2) / extras/conf255.zlib.bin
         try {
             frame.acquireRawDepthImage16Bits().use { d ->
                 if (d.timestamp != lastRawDepthTs) {
                     lastRawDepthTs = d.timestamp
-                    val dr = depthBlob.append(plane(d, 2))
+                    val rawBytes = plane(d, 2)
+                    val dr = depthBlob.append(rawBytes)
                     val rd = JSONObject().apply { put("t", d.timestamp / 1e9); put("d", dr); put("dw", d.width); put("dh", d.height) }
                     var cr: JSONArray? = null
                     try {
                         frame.acquireRawDepthConfidenceImage().use { c ->
                             val c255 = plane(c, 1)
+                            confSub = c255
                             rd.put("c255", conf255Blob.append(c255))
                             val q = ByteArray(c255.size) { i -> val v = c255[i].toInt() and 0xff; (if (v < 85) 0 else if (v < 170) 1 else 2).toByte() }
                             cr = confBlob.append(q)
@@ -419,6 +461,7 @@ class ArRecorder(
                     depthDims = Pair(d.width, d.height)
                     lineFor(d.timestamp)?.apply { put("d", dr); put("c", cr ?: JSONObject.NULL); put("dw", d.width); put("dh", d.height) }
                     rawDepthCount++
+                    rawSub = Triple(DepthFilter.shortsLE(rawBytes, d.width * d.height), d.width, d.height)
                 }
             }
         } catch (_: NotYetAvailableException) {} catch (_: IllegalStateException) {}
@@ -427,25 +470,43 @@ class ArRecorder(
             frame.acquireDepthImage16Bits().use { d ->
                 if (d.timestamp != lastDepthTs) {
                     lastDepthTs = d.timestamp
-                    val r = sdepthBlob.append(plane(d, 2))
-                    if (frame.camera.trackingState == TrackingState.TRACKING) integrate(frame, d)
+                    val smBytes = plane(d, 2)
+                    val r = sdepthBlob.append(smBytes)
+                    smSub = Triple(DepthFilter.shortsLE(smBytes, d.width * d.height), d.width, d.height)
                     o.put("smooth_depth", JSONObject().apply { put("t", d.timestamp / 1e9); put("sd", r); put("w", d.width); put("h", d.height) })
                     lineFor(d.timestamp)?.apply { put("sd", r); if (!has("dw")) { put("dw", d.width); put("dh", d.height) } }
                     depthCount++
                 }
             }
         } catch (_: NotYetAvailableException) {} catch (_: IllegalStateException) {}
+        // -> DepthFusion: raw depth + confidence for the TSDF, dense smoothed depth for the occupancy grid;
+        // smoothed alone (TSDF too) when raw depth has not come for a second.
+        if (frame.camera.trackingState != TrackingState.TRACKING) return
+        val sm = smSub ?: pendingSmooth
+        val raw = rawSub
+        if (raw != null) {
+            pendingSmooth = null
+            submitDepth(frame, raw.first, confSub, raw.second, raw.third, sm?.first, sm?.second ?: 0, sm?.third ?: 0)
+            lastRawSubmitT = frame.timestamp
+        } else if (smSub != null) {
+            if (frame.timestamp - lastRawSubmitT > 1_000_000_000L) { pendingSmooth = null; submitDepth(frame, null, null, 0, 0, sm!!.first, sm.second, sm.third) }
+            else pendingSmooth = smSub
+        }
     }
 
-    /** Smoothed depth -> live map (points + occupancy). Uses the pose of the frame the depth belongs to. */
-    private fun integrate(frame: Frame, d: Image) {
+    /** Newest smoothed depth, attached to the next raw-depth submission (occupancy uses the dense map). */
+    private var pendingSmooth: Triple<ShortArray, Int, Int>? = null
+
+    /** Depth map(s) + pose of this frame -> DepthFusion (filter, occupancy, TSDF) on its worker thread. */
+    private fun submitDepth(frame: Frame, raw: ShortArray?, conf: ByteArray?, rw: Int, rh: Int, smooth: ShortArray?, sw: Int, sh: Int) {
         val k = lastK
         if (k[4] <= 0f) return
-        val sx = d.width / k[4]; val sy = d.height / k[5]
         val m = FloatArray(16)
         frame.camera.pose.toMatrix(m, 0)
-        val p = d.planes[0]
-        map.integrateDepth(p.buffer, d.width, d.height, p.rowStride, k[0] * sx, k[1] * sy, k[2] * sx, k[3] * sy, m, lastHeading, d.timestamp)
+        val rgb = latestRgb?.takeIf { kotlin.math.abs(frame.timestamp - latestRgbT) < 400_000_000L }
+        fusion.submit(DepthFusion.Frame(raw, conf, rw, rh, smooth, sw, sh,
+            floatArrayOf(k[0], k[1], k[2], k[3]), k[4].toInt(), k[5].toInt(), m, frame.timestamp,
+            rgb, if (rgb != null) latestRgbW else 0, if (rgb != null) latestRgbH else 0))
     }
 
     /** Floor height = lowest large upward-facing plane; else 1.4 m below the first tracked camera position. */
@@ -466,7 +527,8 @@ class ArRecorder(
     /** Snapshot for the UI thread: stats lines. */
     fun liveStats(): List<String> = listOf(
         "frames $videoIdx  depth $depthCount  tracked $trackedFrames",
-        "map %.1f m2  points %d  walked %.1f m".format(map.knownAreaM2(), map.pointCount, map.travelled),
+        "map %.1f m2  walked %.1f m".format(map.knownAreaM2(), map.travelled),
+        "mesh %d tris  blocks %d  fused %d  %.1f ms/frame".format(fusion.liveMesh?.triangles ?: 0, fusion.tsdf.blockCount, fusion.fused, fusion.integrateMs + fusion.filterMs),
         "floor %s".format(if (map.floorY.isNaN()) "?" else "%.2f m".format(map.floorY)),
     )
 
