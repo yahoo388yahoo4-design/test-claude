@@ -32,6 +32,8 @@ android {
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Robolectric screenshot test (UiScreenshotTest) needs the merged resources
+        unitTests.isIncludeAndroidResources = true
     }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -53,6 +55,8 @@ dependencies {
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     testImplementation("junit:junit:4.13.2")
+    // UiScreenshotTest: renders the redesigned screens off-device (native graphics) to build/screenshots/
+    testImplementation("org.robolectric:robolectric:4.16")
     // real org.json for JVM tests (android.jar only has stubs)
     testImplementation("org.json:json:20260814")
 }

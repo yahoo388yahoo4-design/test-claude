@@ -40,7 +40,15 @@ class HudView(ctx: Context) : View(ctx) {
     }
 
     @Volatile var state = State()
-        set(v) { field = v; postInvalidate() }
+        set(v) { field = v; postInvalidate(); onState?.let { cb -> post { cb(v) } } }
+
+    /**
+     * Compact mode (navigation screen): only what belongs in the camera image (projected path, goal,
+     * warning banner) is drawn here; the stats, radar, distances, dial and instruction are native
+     * cards fed through [onState] (called on the UI thread for every new state).
+     */
+    var compact = false
+    var onState: ((State) -> Unit)? = null
 
     private val dp = resources.displayMetrics.density
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 13 * dp; typeface = android.graphics.Typeface.MONOSPACE }
@@ -75,6 +83,11 @@ class HudView(ctx: Context) : View(ctx) {
             c.drawPath(path, pathPaint)
         }
         st.goalPx?.let { g -> if (!g[0].isNaN()) { fill.color = Color.rgb(255, 200, 20); c.drawCircle(g[0], g[1], 14 * dp, fill); c.drawText("GOAL", g[0], g[1] - 20 * dp, big) } }
+
+        if (compact) {
+            drawBanner(c, st, w, h)
+            return
+        }
 
         // stats block, top-left (below the controls when not navigating is handled by layout margins)
         if (st.lines.isNotEmpty()) {
@@ -158,10 +171,15 @@ class HudView(ctx: Context) : View(ctx) {
             c.drawRoundRect(RectF(w / 2 - big.measureText(st.instruction) / 2 - 12 * dp, h * 0.42f + 60 * dp, w / 2 + big.measureText(st.instruction) / 2 + 12 * dp, h * 0.42f + 96 * dp), 8 * dp, 8 * dp, bg)
             c.drawText(st.instruction, w / 2, h * 0.42f + 88 * dp, big)
         }
-        if (st.banner.isNotEmpty()) {
-            fill.color = st.bannerColor; fill.alpha = 200
-            c.drawRect(0f, h * 0.30f, w, h * 0.30f + 44 * dp, fill)
-            c.drawText(st.banner, w / 2, h * 0.30f + 31 * dp, big)
-        }
+        drawBanner(c, st, w, h)
+    }
+
+    private fun drawBanner(c: Canvas, st: State, w: Float, h: Float) {
+        if (st.banner.isEmpty()) return
+        fill.color = st.bannerColor; fill.alpha = 220
+        val tw = big.measureText(st.banner) + 36 * dp
+        val top = h * 0.40f
+        c.drawRoundRect(RectF((w - tw) / 2, top, (w + tw) / 2, top + 44 * dp), 22 * dp, 22 * dp, fill)
+        c.drawText(st.banner, w / 2, top + 30 * dp, big)
     }
 }

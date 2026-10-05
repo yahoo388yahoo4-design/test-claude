@@ -13,15 +13,10 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.real2sim.capture.robot.UsbRobot
@@ -138,6 +133,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.edgeToEdge(this)
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         guide = Guidance(this)
@@ -154,17 +150,13 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         root.addView(gl, FrameLayout.LayoutParams(-1, -1))
-        hud = HudView(this)
+        hud = HudView(this).apply { compact = true; onState = { st -> showHud(st) } }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
-        mapView = MapView(this).apply { title = "tap to set goal" }
-        val side = (resources.displayMetrics.widthPixels * 0.46f).toInt()
-        root.addView(mapView, FrameLayout.LayoutParams(side, side).apply { gravity = Gravity.TOP or Gravity.END; topMargin = dp(8); rightMargin = dp(8) })
+        mapView = MapView(this).apply { title = "tap = goal" }
         mapView.onTap = { x, z -> setGoal(x, z, "map") }
-        root.addView(controls(), FrameLayout.LayoutParams(-1, -2).apply { gravity = Gravity.BOTTOM; bottomMargin = 0 })
-        joyView?.let { root.addView(it, FrameLayout.LayoutParams(dp(170), dp(170)).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL; leftMargin = dp(10) }) }
-        voice = VoiceAssistant(this, voiceActions) { status(it) }.also { v ->
-            root.addView(v.micButton(), FrameLayout.LayoutParams(dp(64), dp(64)).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; rightMargin = dp(10) })
-        }
+        loadParams()
+        voice = VoiceAssistant(this, voiceActions) { status(it) }
+        root.addView(overlay(), FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         gl.setOnTouchListener { v, e ->
             if (e.action == MotionEvent.ACTION_UP) { taps.add(floatArrayOf(e.x, e.y)); v.performClick() }
@@ -174,83 +166,193 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     // ------------------------------------------------------------------ UI
-    @SuppressLint("SetTextI18n")
-    private fun controls(): View {
-        fun btn(t: String, color: Int? = null, f: () -> Unit) = Button(this).apply {
-            text = t; isAllCaps = false; setOnClickListener { f() }
-            color?.let { setBackgroundColor(it); setTextColor(Color.WHITE) }
-        }
-        fun num(hint: String, v: String, w: Int = 70) = EditText(this).apply {
-            this.hint = hint; setText(v); inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
-            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); width = dp(w)
-        }
-        fun lab(t: String) = TextView(this).apply { text = t; setTextColor(Color.LTGRAY); textSize = 11f }
-        fun row(vararg v: View) = HorizontalScrollView(this).apply {
-            addView(LinearLayout(this@NavActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; v.forEach { addView(it) } })
-        }
-        val prefs = getSharedPreferences("nav", Context.MODE_PRIVATE)
+    // Laid out like the iOS NavModeView: top bar (close · tracking / map / link · settings), instruction
+    // banner, gauges, then at the bottom the voice button and one material panel with radar + minimap,
+    // distance chips, the Guide / Auto / Manual picker, manual drive controls and the action row
+    // (go-to menu · GO · STOP · save map). Everything else is in the settings sheet.
+
+    private val prefs by lazy { getSharedPreferences("nav", Context.MODE_PRIVATE) }
+    private lateinit var trackDot: View
+    private lateinit var trackText: TextView
+    private lateinit var mapText: TextView
+    private lateinit var linkDot: View
+    private lateinit var linkText: TextView
+    private lateinit var arrow: ImageView
+    private lateinit var instrText: TextView
+    private lateinit var instrSub: TextView
+    private lateinit var gauge: SpeedGauge
+    private lateinit var statsText: TextView
+    private lateinit var radar: RadarView
+    private lateinit var distances: DistanceRow
+    private lateinit var modeControl: SegmentedControl
+    private lateinit var manualBox: View
+    private lateinit var actionRow: LinearLayout
+    private lateinit var goBtn: View
+    private lateinit var manualToggle: ImageView
+    private var showManual = true
+    private val hideToast = Runnable { statusView.visibility = View.GONE }
+
+    private fun loadParams() {
         fun pf(k: String, d: Float) = prefs.getFloat(k, d)
         mountHeight = pf("mount", mountHeight); mountForward = pf("mountFwd", mountForward); robotRadius = pf("radius", robotRadius)
         robotHeight = pf("height", robotHeight); vMax = pf("vmax", vMax); wMax = pf("wmax", wMax)
         stopDist = pf("stop", stopDist); slowDist = pf("slow", slowDist); goalTol = pf("goalTol", goalTol)
         closedLoopMoves = prefs.getBoolean("closedLoop", true); haptics = prefs.getBoolean("haptics", true)
+        map.maxObstacleHeight = robotHeight + 0.1f
+    }
 
-        val kinds = arrayOf("None (guide only)", "Wi-Fi (WebSocket)", "Bluetooth LE (UART)", "USB: Neato", "USB: OpenBot")
-        val linkKind = android.widget.Spinner(this).apply {
-            adapter = android.widget.ArrayAdapter(this@NavActivity, android.R.layout.simple_spinner_dropdown_item, kinds)
-            setSelection(prefs.getInt("linkKind", 1)); setBackgroundColor(Color.LTGRAY)
+    private fun card(v: View, radius: Float = 12f, padDp: Int = 8): View = v.apply {
+        background = Ui.material(this@NavActivity, radius)
+        setPadding(dp(padDp), dp(padDp), dp(padDp), dp(padDp))
+    }
+
+    private fun dot(color: Int) = View(this).apply { background = Ui.oval(color); layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)) }
+
+    @SuppressLint("SetTextI18n")
+    private fun overlay(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(4), dp(10), dp(6)) }
+        Ui.applyInsets(col, top = true, bottom = true)
+
+        // top bar
+        trackDot = dot(Ui.ORANGE); linkDot = dot(Ui.GRAY)
+        trackText = Ui.label(this, "Starting ARCore…", 11f, Color.WHITE, Ui.SEMIBOLD).apply { maxLines = 1 }
+        mapText = Ui.label(this, "", 11f, Ui.SECONDARY, digits = true).apply { maxLines = 1 }
+        linkText = Ui.label(this, link.statusLine(), 11f, Color.WHITE, digits = true).apply { maxLines = 1 }
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(hstack(this@NavActivity, 6, trackDot, trackText))
+            addView(mapText.apply { setPadding(0, dp(2), 0, dp(2)) })
+            addView(hstack(this@NavActivity, 6, linkDot, linkText))
         }
-        val url = EditText(this).apply {
-            hint = "ws://192.168.4.1:8777/robot"; setText(prefs.getString("wsUrl", "ws://192.168.4.1:8777/robot")); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
-            width = dp(200); inputType = InputType.TYPE_TEXT_VARIATION_URI
+        val close = Ui.iconButton(this, R.drawable.ic_close, "Close", 36, bg = Color.argb(70, 255, 255, 255)).apply { setOnClickListener { finish() } }
+        val gear = Ui.iconButton(this, R.drawable.ic_gear, "Navigation settings", 36, bg = Color.argb(70, 255, 255, 255)).apply { setOnClickListener { showSettings() } }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(close)
+            addView(info, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8); marginEnd = dp(8) })
+            addView(gear)
         }
-        val bleName = EditText(this).apply {
-            hint = "BLE name"; setText(prefs.getString("bleName", "R2S-Robot")); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); width = dp(110)
+        col.addView(card(top))
+
+        // instruction banner
+        arrow = ImageView(this).apply { setImageResource(R.drawable.ic_mappin); imageTintList = android.content.res.ColorStateList.valueOf(Ui.CYAN) }
+        instrText = Ui.label(this, "Tap the map or the floor to set a goal", 17f, Color.WHITE, Ui.SEMIBOLD).apply { maxLines = 2 }
+        instrSub = Ui.label(this, "Guide", 12f, Ui.SECONDARY, digits = true).apply { maxLines = 1; setPadding(0, dp(2), 0, 0) }
+        val banner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(arrow, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
+            addView(LinearLayout(this@NavActivity).apply { orientation = LinearLayout.VERTICAL; addView(instrText); addView(instrSub) }, LinearLayout.LayoutParams(0, -2, 1f))
         }
-        val connect = btn("Connect") {
-            prefs.edit().putInt("linkKind", linkKind.selectedItemPosition).putString("wsUrl", url.text.toString()).putString("bleName", bleName.text.toString()).apply()
-            if (linkKind.selectedItemPosition >= 3) {   // Neato / OpenBot on the phone's USB-OTG port (robot/UsbRobot.kt)
-                val rk = if (linkKind.selectedItemPosition == 3) UsbRobotKind.NEATO else UsbRobotKind.OPENBOT
-                link.connectCustom("USB ${rk.title}") { incoming -> UsbRobot(this, rk, incoming) { status(it) }.also { it.start() } }
-                return@btn
+        col.addView(card(banner), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+        // gauges (left)
+        gauge = SpeedGauge(this)
+        statsText = Ui.label(this, "", 9f, Color.WHITE, digits = true).apply { setLineSpacing(0f, 1.1f) }
+        val gauges = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(card(FrameLayout(this@NavActivity).apply { addView(gauge, FrameLayout.LayoutParams(dp(84), dp(84))) }, 12f, 4),
+                LinearLayout.LayoutParams(-2, -2))
+            addView(card(statsText, 8f, 5), LinearLayout.LayoutParams(dp(236), -2).apply { topMargin = dp(6) })
+        }
+        col.addView(gauges, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
+        col.addView(View(this), LinearLayout.LayoutParams(-1, 0, 1f))
+
+        // toast (status messages; tap to dismiss)
+        statusView = Ui.label(this, "", 12f, Color.WHITE).apply {
+            background = Ui.material(this@NavActivity, 14f)
+            setPadding(dp(12), dp(6), dp(12), dp(6)); gravity = Gravity.CENTER; maxLines = 3
+            visibility = View.GONE
+            setOnClickListener { visibility = View.GONE }
+        }
+        col.addView(statusView, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(6) })
+
+        // voice (iOS VoiceOverlay: small gear above the round mic, right-aligned)
+        voice?.let { v ->
+            val vcol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                addView(Ui.iconButton(this@NavActivity, R.drawable.ic_gear, "Voice settings", 30, bg = Color.argb(115, 0, 0, 0)).apply { setOnClickListener { v.showSettings() } })
+                addView(v.micButton(), LinearLayout.LayoutParams(dp(58), dp(58)).apply { topMargin = dp(6) })
             }
-            val k = RobotLink.Kind.values()[linkKind.selectedItemPosition]
-            if (k == RobotLink.Kind.BLE && !hasBlePermission()) { requestBlePermission(); return@btn }
-            link.connect(k, url.text.toString(), bleName.text.toString())
+            col.addView(vcol, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END; bottomMargin = dp(6) })
         }
-        val disconnect = btn("Disconnect") { link.disconnect() }
-        val stop = btn("STOP", Color.rgb(200, 30, 30)) { stopAll("Stopped") }
-        val estopOn = btn("E-stop latch") { stopAll("Emergency stop"); link.estop(true) }
-        val estopOff = btn("Release") { link.estop(false) }
 
-        val modes = android.widget.RadioGroup(this).apply { orientation = LinearLayout.HORIZONTAL }
-        modeGroup = modes
-        Drive.values().forEach { d ->
-            modes.addView(android.widget.RadioButton(this).apply {
-                id = View.generateViewId(); text = d.name.lowercase().replaceFirstChar { it.uppercase() }; setTextColor(Color.WHITE); tag = d
-                isChecked = d == drive
+        // bottom panel
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        radar = RadarView(this).apply { background = Ui.rounded(Color.argb(115, 0, 0, 0), Ui.dp(this@NavActivity, 10f)) }
+        mapView.background = Ui.rounded(Color.argb(115, 0, 0, 0), Ui.dp(this, 10f)); mapView.clipToOutline = true
+        panel.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(radar, LinearLayout.LayoutParams(0, dp(150), 1f))
+            addView(mapView, LinearLayout.LayoutParams(0, dp(150), 1f).apply { marginStart = dp(8) })
+        })
+        distances = DistanceRow(this)
+        panel.addView(distances, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        modeControl = SegmentedControl(this).apply {
+            setItems(Drive.values().map { it.name.lowercase().replaceFirstChar { c -> c.uppercase() } }, drive.ordinal)
+            onSelect = { i -> setDrive(Drive.values()[i]) }
+        }
+        panel.addView(modeControl, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        manualBox = manualControls()
+        panel.addView(manualBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        actionRow = actionRow()
+        panel.addView(actionRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        col.addView(card(panel, 16f, 10))
+        refreshDriveUi()
+        return col
+    }
+
+    private fun actionRow(): LinearLayout {
+        val goTo = Ui.iconButton(this, R.drawable.ic_mappin, "Go to", 40, bg = Color.TRANSPARENT).apply { setOnClickListener { goToMenu() } }
+        goBtn = Ui.filledButton(this, "GO", Ui.GREEN) { go() }.apply { layoutParams = LinearLayout.LayoutParams(dp(56), dp(44)) }
+        manualToggle = ImageView(this).apply {
+            setImageResource(R.drawable.ic_chevron_down); contentDescription = "Show or hide manual controls"
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setOnClickListener { showManual = !showManual; refreshDriveUi() }
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+        }
+        val stop = Ui.filledButton(this, "STOP", Ui.RED) { stopAll("Stopped") }.apply {
+            typeface = android.graphics.Typeface.create("sans-serif-black", android.graphics.Typeface.NORMAL)
+            layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
+        }
+        val save = Ui.iconButton(this, R.drawable.ic_save, "Save map", 40, bg = Color.TRANSPARENT).apply { setOnClickListener { saveMap() } }
+        return hstack(this, 10, goTo, goBtn, manualToggle, stop, save)
+    }
+
+    /** iOS ManualControls: joystick on the left; move / turn steppers with speed sliders on the right. */
+    @SuppressLint("SetTextI18n")
+    private fun manualControls(): View {
+        val joy = JoystickView(this)
+        joy.onChange = { f, l -> task = if (f == 0f && l == 0f) Task.Idle else Task.Joy(f * vMax, l * wMax, SystemClock.elapsedRealtime()) }
+        var moveCm = 50f; var speedCms = 15f; var turnDeg = 90f; var turnDps = 45f
+        val moveLabel = Ui.label(this, "", 12f, Color.WHITE, digits = true)
+        val turnLabel = Ui.label(this, "", 12f, Color.WHITE, digits = true)
+        fun labels() {
+            moveLabel.text = "${moveCm.toInt()} cm @ ${speedCms.toInt()} cm/s"
+            turnLabel.text = "${turnDeg.toInt()}° @ ${turnDps.toInt()}°/s"
+        }
+        labels()
+        fun stepper(get: () -> Float, set: (Float) -> Unit, lo: Float, hi: Float, step: Float): View {
+            val box = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; background = Ui.rounded(Ui.BG_FILL, Ui.dp(this@NavActivity, 7f)) }
+            fun b(t: String, d: Float) = Ui.label(this, t, 17f, Color.WHITE).apply {
+                gravity = Gravity.CENTER; contentDescription = if (d < 0) "less" else "more"
+                setOnClickListener { set((get() + d).coerceIn(lo, hi)); labels() }
+            }
+            box.addView(b("−", -step), LinearLayout.LayoutParams(dp(34), dp(28)))
+            box.addView(b("+", step), LinearLayout.LayoutParams(dp(34), dp(28)))
+            return box
+        }
+        fun slider(get: () -> Float, set: (Float) -> Unit, lo: Float, hi: Float, step: Float) = android.widget.SeekBar(this).apply {
+            max = ((hi - lo) / step).toInt(); progress = ((get() - lo) / step).toInt()
+            progressTintList = android.content.res.ColorStateList.valueOf(Ui.BLUE)
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar, p: Int, fromUser: Boolean) { if (fromUser) { set(lo + p * step); labels() } }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar) {}
             })
         }
-        val joy = JoystickView(this).apply { visibility = View.GONE }
-        joy.onChange = { f, l -> task = if (f == 0f && l == 0f) Task.Idle else Task.Joy(f * vMax, l * wMax, SystemClock.elapsedRealtime()) }
-        modes.setOnCheckedChangeListener { g, id ->
-            drive = g.findViewById<View>(id).tag as Drive
-            task = Task.Idle; sendStop()
-            joy.visibility = if (drive == Drive.MANUAL) View.VISIBLE else View.GONE
-            guide.say("${drive.name.lowercase()} mode", force = true)
-        }
-        val voice = CheckBox(this).apply { text = "Voice"; isChecked = true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> guide.voice = c } }
-        val beeps = CheckBox(this).apply { text = "Beeps"; isChecked = true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> guide.beeps = c } }
-        val hapt = CheckBox(this).apply { text = "Haptics"; isChecked = haptics; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> haptics = c; prefs.edit().putBoolean("haptics", c).apply() } }
-        val points = CheckBox(this).apply { text = "3D points"; isChecked = true; setTextColor(Color.WHITE); setOnCheckedChangeListener { _, c -> cloud.visible = c } }
-        val closed = CheckBox(this).apply {
-            text = "Moves closed-loop (ARCore)"; isChecked = closedLoopMoves; setTextColor(Color.WHITE)
-            setOnCheckedChangeListener { _, c -> closedLoopMoves = c; prefs.edit().putBoolean("closedLoop", c).apply() }
-        }
-
-        val dist = num("cm", "50"); val spd = num("cm/s", "15"); val ang = num("deg", "90"); val tspd = num("deg/s", "45")
         fun doMove(sign: Float) {
-            val d = sign * (dist.text.toString().toFloatOrNull() ?: return); val v = spd.text.toString().toFloatOrNull() ?: return
+            val d = sign * moveCm; val v = speedCms
             val lp = lastPose
             lp?.let { manual = floatArrayOf(it[0], it[1], it[2], d, 0f) }
             if (!closedLoopMoves) { if (!link.move(d, v)) status("robot not connected (measuring phone motion only)") }
@@ -258,54 +360,199 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             guide.say("Moving ${if (d < 0) "back " else ""}${abs(d).toInt()} centimeters", force = true)
         }
         fun doTurn(sign: Float) {
-            val a = sign * (ang.text.toString().toFloatOrNull() ?: return); val w = tspd.text.toString().toFloatOrNull() ?: return
+            val a = sign * turnDeg; val w = turnDps
             val lp = lastPose
             lp?.let { manual = floatArrayOf(it[0], it[1], it[2], a, 1f) }
             if (!closedLoopMoves) { if (!link.turn(a, w)) status("robot not connected (measuring phone motion only)") }
             else if (lp != null) task = Task.Turn(lp[2], 0f, Math.toRadians(a.toDouble()).toFloat(), Math.toRadians(w.toDouble()).toFloat(), SystemClock.elapsedRealtime())
             guide.say("Turning ${if (a > 0) "left" else "right"} ${abs(a).toInt()} degrees", force = true)
         }
-        val fields = linkedMapOf(
-            "mount" to num("mount cm", "${(mountHeight * 100).toInt()}"), "fwd" to num("fwd cm", "${(mountForward * 100).toInt()}"),
-            "radius" to num("radius cm", "${(robotRadius * 100).toInt()}"), "height" to num("height cm", "${(robotHeight * 100).toInt()}"),
-            "vmax" to num("cm/s", "${(vMax * 100).toInt()}"), "wmax" to num("deg/s", "${Math.toDegrees(wMax.toDouble()).toInt()}"),
-            "slow" to num("slow cm", "${(slowDist * 100).toInt()}"), "stop" to num("stop cm", "${(stopDist * 100).toInt()}"),
-            "goal" to num("goal cm", "${(goalTol * 100).toInt()}"))
-        val apply = btn("Apply") {
-            fun v(k: String) = fields[k]!!.text.toString().toFloatOrNull()
-            v("mount")?.let { mountHeight = it / 100 }; v("fwd")?.let { mountForward = it / 100 }
-            v("radius")?.let { robotRadius = it / 100 }; v("height")?.let { robotHeight = it / 100; map.maxObstacleHeight = robotHeight + 0.1f }
-            v("vmax")?.let { vMax = it / 100 }; v("wmax")?.let { wMax = Math.toRadians(it.toDouble()).toFloat() }
-            v("stop")?.let { stopDist = it / 100 }; v("slow")?.let { slowDist = maxOf(it / 100, stopDist + 0.05f) }; v("goal")?.let { goalTol = it / 100 }
-            prefs.edit().putFloat("mount", mountHeight).putFloat("mountFwd", mountForward).putFloat("radius", robotRadius).putFloat("height", robotHeight)
-                .putFloat("vmax", vMax).putFloat("wmax", wMax).putFloat("stop", stopDist).putFloat("slow", slowDist).putFloat("goalTol", goalTol).apply()
-            path = null; lastPlanMs = 0
-            status("params: mount ${(mountHeight * 100).toInt()} cm (fwd ${(mountForward * 100).toInt()}), radius ${(robotRadius * 100).toInt()} cm, height ${(robotHeight * 100).toInt()} cm, " +
-                "vmax ${(vMax * 100).toInt()} cm/s, slow/stop ${(slowDist * 100).toInt()}/${(stopDist * 100).toInt()} cm")
+        fun pair(l: String, lf: () -> Unit, r: String, rf: () -> Unit) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Ui.borderedButton(this@NavActivity, l) { lf() }, LinearLayout.LayoutParams(0, dp(34), 1f))
+            addView(Ui.borderedButton(this@NavActivity, r) { rf() }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(8) })
         }
-        map.maxObstacleHeight = robotHeight + 0.1f
-
-        statusView = TextView(this).apply { setTextColor(Color.rgb(0, 255, 120)); textSize = 11f; typeface = android.graphics.Typeface.MONOSPACE }
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.argb(170, 0, 0, 0)); setPadding(dp(6), dp(4), dp(6), dp(4))
-            addView(row(stop, modes, estopOn, estopOff))
-            addView(row(linkKind, url, bleName, connect, disconnect))
-            addView(row(btn("Load map") { loadMap() }, btn("Align") { align() }, btn("Same start") { mergeSameStart() },
-                btn("Save map") { saveMap() }, btn("Clear goal") { goal = null; path = null; mapView.goal = null; mapView.path = null; sendStop() },
-                btn("New map") { resetMap() }))
-            addView(row(voice, beeps, hapt, points, closed))
-            addView(row(lab("move"), dist, lab("at"), spd, btn("▲ Fwd") { doMove(1f) }, btn("▼ Back") { doMove(-1f) },
-                lab("  turn"), ang, lab("at"), tspd, btn("⟲ Left") { doTurn(1f) }, btn("Right ⟳") { doTurn(-1f) }))
-            addView(row(*fields.flatMap { (k, e) -> listOf(lab(k), e) }.toTypedArray(), apply))
-            addView(statusView)
+        fun header(l: TextView, st: View) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(l, LinearLayout.LayoutParams(0, -2, 1f)); addView(st)
         }
-        val wrap = FrameLayout(this)
-        wrap.addView(ScrollView(this).apply { addView(panel); isFillViewport = false }, FrameLayout.LayoutParams(-1, -2).apply { gravity = Gravity.BOTTOM })
-        joyView = joy
-        return wrap.also { it.layoutParams = ViewGroup.LayoutParams(-1, -2) }
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(header(moveLabel, stepper({ moveCm }, { moveCm = it }, 5f, 500f, 5f)))
+            addView(slider({ speedCms }, { speedCms = it }, 5f, 100f, 5f), LinearLayout.LayoutParams(-1, dp(24)))
+            addView(pair("▲ Fwd", { doMove(1f) }, "▼ Back", { doMove(-1f) }))
+            addView(header(turnLabel, stepper({ turnDeg }, { turnDeg = it }, 5f, 360f, 5f)), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            addView(slider({ turnDps }, { turnDps = it }, 10f, 180f, 5f), LinearLayout.LayoutParams(-1, dp(24)))
+            addView(pair("⟲ Left", { doTurn(1f) }, "Right ⟳", { doTurn(-1f) }))
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(joy, LinearLayout.LayoutParams(dp(110), dp(110)))
+            addView(right, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10) })
+        }
     }
-    private var joyView: JoystickView? = null
-    private var modeGroup: android.widget.RadioGroup? = null
+
+    private fun setDrive(d: Drive) {
+        drive = d
+        task = Task.Idle; sendStop()
+        guide.say("${drive.name.lowercase()} mode", force = true)
+        refreshDriveUi()
+    }
+
+    private fun refreshDriveUi() {
+        if (modeControl.selected != drive.ordinal) modeControl.select(drive.ordinal)
+        manualBox.visibility = if (drive == Drive.MANUAL && showManual) View.VISIBLE else View.GONE
+        goBtn.visibility = if (drive == Drive.AUTO) View.VISIBLE else View.GONE
+        manualToggle.visibility = if (drive == Drive.MANUAL) View.VISIBLE else View.GONE
+        manualToggle.setImageResource(if (showManual) R.drawable.ic_chevron_down else R.drawable.ic_gamepad)
+    }
+
+    /** iOS GO: (re)start following the current goal. */
+    private fun go() {
+        val g = goal ?: run { status("Pick a goal first: tap the map or the floor"); guide.say("Pick a goal first", force = true); return }
+        setGoal(g[0], g[1], "GO")
+    }
+
+    /** iOS "Go to" menu (no RoomPlan objects on Android: a few handy goals instead). */
+    private fun goToMenu() {
+        val items = arrayOf("1 m ahead", "Back to the start point", "Clear goal")
+        Ui.alert(this).setTitle("Go to").setItems(items) { _, i ->
+            when (i) {
+                0 -> voiceActions.goToRelative(1.0, 0.0, false)
+                1 -> setGoal(0f, 0f, "start point")
+                else -> clearGoal()
+            }
+        }.show()
+    }
+
+    private fun clearGoal() { goal = null; path = null; mapView.goal = null; mapView.path = null; sendStop() }
+
+    /** Feeds the native HUD cards from the state NavActivity computes for HudView (UI thread). */
+    @SuppressLint("SetTextI18n")
+    private fun showHud(st: HudView.State) {
+        val lost = st.banner.startsWith("TRACKING")
+        trackDot.background = Ui.oval(if (lost) Ui.ORANGE else Ui.GREEN)
+        trackText.text = if (lost) st.lines.firstOrNull() ?: st.banner else "Tracking OK"
+        mapText.text = if (lost) st.lines.getOrNull(1) ?: "" else st.lines.firstOrNull()?.removePrefix("track OK")?.trim() ?: ""
+        val connected = link.connected
+        val stTxt = link.statusLine()
+        linkDot.background = Ui.oval(when {
+            connected -> Ui.GREEN
+            stTxt.contains("connecting", true) -> Ui.YELLOW
+            stTxt.contains("fail", true) || stTxt.contains("error", true) -> Ui.RED
+            else -> Ui.GRAY
+        })
+        linkText.text = stTxt
+        val g = goal; val p = lastPose
+        if (!st.bearing.isNaN() && g != null) {
+            arrow.setImageResource(R.drawable.ic_nav)
+            arrow.rotation = -Math.toDegrees(st.bearing.toDouble()).toFloat()
+        } else { arrow.setImageResource(R.drawable.ic_mappin); arrow.rotation = 0f }
+        arrow.imageTintList = android.content.res.ColorStateList.valueOf(if (st.banner.startsWith("BLOCKED")) Ui.RED else Ui.CYAN)
+        instrText.text = when {
+            st.instruction.isNotEmpty() -> st.instruction
+            st.banner.isNotEmpty() -> st.banner.lowercase().replaceFirstChar { it.uppercase() }
+            g == null -> "Tap the map or the floor to set a goal"
+            else -> "Planning…"
+        }
+        val sub = StringBuilder(drive.name.lowercase().replaceFirstChar { it.uppercase() })
+        if (g != null && p != null) sub.append("   goal ").append(fmtDist(hypot(g[0] - p[0], g[1] - p[1])))
+        if (!st.bearing.isNaN()) sub.append("   %+.0f°".format(Math.toDegrees(st.bearing.toDouble())))
+        instrSub.text = sub
+        gauge.set(st.speed, lastCmd[0], vMax, st.robotSpeed)
+        statsText.text = st.lines.drop(1).joinToString("\n")
+        radar.robotRadius = robotRadius; radar.stop = stopDist; radar.slow = slowDist
+        radar.scan = st.scan
+        val nearest = st.scan?.filter { it.isFinite() }?.minOrNull()?.minus(robotRadius) ?: Float.POSITIVE_INFINITY
+        distances.set(st.front, st.left - robotRadius, st.right - robotRadius, nearest, stopDist, slowDist)
+    }
+
+    /** Settings sheet, sectioned like the iOS NavSettingsView. Parameters are applied when it closes. */
+    @SuppressLint("SetTextI18n")
+    private fun showSettings() {
+        val kinds = listOf("None (guide only)", "Wi-Fi (WebSocket)", "Bluetooth LE (UART)", "USB: Neato", "USB: OpenBot")
+        var kind = prefs.getInt("linkKind", 1)
+        var url = prefs.getString("wsUrl", "ws://192.168.4.1:8777/robot") ?: ""
+        var ble = prefs.getString("bleName", "R2S-Robot") ?: ""
+        val vals = linkedMapOf(
+            "mount" to "${(mountHeight * 100).toInt()}", "fwd" to "${(mountForward * 100).toInt()}",
+            "radius" to "${(robotRadius * 100).toInt()}", "height" to "${(robotHeight * 100).toInt()}",
+            "vmax" to "${(vMax * 100).toInt()}", "wmax" to "${Math.toDegrees(wMax.toDouble()).toInt()}",
+            "slow" to "${(slowDist * 100).toInt()}", "stop" to "${(stopDist * 100).toInt()}", "goal" to "${(goalTol * 100).toInt()}")
+        val start = HashMap(vals)
+        val sheet = Sheet(this, "Navigation")
+        sheet.form {
+            section("Map (from mode A or a saved nav map)",
+                "Load brings back the newest map in ${mapsDir().name}/. Align matches it to the live map after a short look around; Same start assumes you started where it started.") {
+                button("Load map") { loadMap() }
+                button("Align to live map") { align() }
+                button("Merge (same start)") { mergeSameStart() }
+                button("Save map") { saveMap() }
+                button("Clear goal") { clearGoal() }
+                button("New map", Ui.RED) { resetMap() }
+            }
+            section("Robot link", "Closed-loop: the phone measures the motion and streams velocities. Off: \"move\" and \"turn\" go to the robot as is (it needs encoders).") {
+                choice("Link", kinds, kind) { kind = it }
+                field("ws://192.168.4.1:8777/robot", url, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI) { url = it }
+                field("BLE name prefix", ble) { ble = it }
+                button("Connect") {
+                    prefs.edit().putInt("linkKind", kind).putString("wsUrl", url).putString("bleName", ble).apply()
+                    connect(kind, url, ble)
+                }
+                button("Disconnect") { link.disconnect() }
+                button("E-stop latch", Ui.RED) { stopAll("Emergency stop"); link.estop(true) }
+                button("Release E-stop") { link.estop(false) }
+                toggle("Moves / turns closed-loop with ARCore", closedLoopMoves) { c -> closedLoopMoves = c; prefs.edit().putBoolean("closedLoop", c).apply() }
+            }
+            section("Robot and mount") {
+                number("Camera height (until floor found)", vals["mount"]!!, "cm") { vals["mount"] = it }
+                number("Camera ahead of turning centre", vals["fwd"]!!, "cm") { vals["fwd"] = it }
+                number("Robot radius", vals["radius"]!!, "cm") { vals["radius"] = it }
+                number("Obstacle height up to", vals["height"]!!, "cm") { vals["height"] = it }
+            }
+            section("Motion and safety") {
+                number("Max speed", vals["vmax"]!!, "cm/s") { vals["vmax"] = it }
+                number("Max turn rate", vals["wmax"]!!, "°/s") { vals["wmax"] = it }
+                number("Slow down below", vals["slow"]!!, "cm") { vals["slow"] = it }
+                number("Stop below", vals["stop"]!!, "cm") { vals["stop"] = it }
+                number("Goal tolerance", vals["goal"]!!, "cm") { vals["goal"] = it }
+            }
+            section("Guidance and display") {
+                toggle("Voice instructions", guide.voice) { guide.voice = it }
+                toggle("Proximity beeps", guide.beeps) { guide.beeps = it }
+                toggle("Haptics", haptics) { c -> haptics = c; prefs.edit().putBoolean("haptics", c).apply() }
+                toggle("Show 3D points", cloud.visible) { cloud.visible = it }
+                button("Voice assistant settings…") { voice?.showSettings() }
+            }
+        }
+        sheet.onDismiss = { if (vals != start) applyParams(vals) }
+        sheet.show()
+    }
+
+    private fun connect(kind: Int, url: String, ble: String) {
+        if (kind >= 3) {   // Neato / OpenBot on the phone's USB-OTG port (robot/UsbRobot.kt)
+            val rk = if (kind == 3) UsbRobotKind.NEATO else UsbRobotKind.OPENBOT
+            link.connectCustom("USB ${rk.title}") { incoming -> UsbRobot(this, rk, incoming) { status(it) }.also { it.start() } }
+            return
+        }
+        val k = RobotLink.Kind.values()[kind]
+        if (k == RobotLink.Kind.BLE && !hasBlePermission()) { requestBlePermission(); return }
+        link.connect(k, url, ble)
+    }
+
+    private fun applyParams(f: Map<String, String>) {
+        fun v(k: String) = f[k]?.toFloatOrNull()
+        v("mount")?.let { mountHeight = it / 100 }; v("fwd")?.let { mountForward = it / 100 }
+        v("radius")?.let { robotRadius = it / 100 }; v("height")?.let { robotHeight = it / 100; map.maxObstacleHeight = robotHeight + 0.1f }
+        v("vmax")?.let { vMax = it / 100 }; v("wmax")?.let { wMax = Math.toRadians(it.toDouble()).toFloat() }
+        v("stop")?.let { stopDist = it / 100 }; v("slow")?.let { slowDist = maxOf(it / 100, stopDist + 0.05f) }; v("goal")?.let { goalTol = it / 100 }
+        prefs.edit().putFloat("mount", mountHeight).putFloat("mountFwd", mountForward).putFloat("radius", robotRadius).putFloat("height", robotHeight)
+            .putFloat("vmax", vMax).putFloat("wmax", wMax).putFloat("stop", stopDist).putFloat("slow", slowDist).putFloat("goalTol", goalTol).apply()
+        path = null; lastPlanMs = 0
+        status("params: mount ${(mountHeight * 100).toInt()} cm (fwd ${(mountForward * 100).toInt()}), radius ${(robotRadius * 100).toInt()} cm, height ${(robotHeight * 100).toInt()} cm, " +
+            "vmax ${(vMax * 100).toInt()} cm/s, slow/stop ${(slowDist * 100).toInt()}/${(stopDist * 100).toInt()} cm")
+    }
+
     private var voice: VoiceAssistant? = null
 
     /** Voice control (voice/VoiceAssistant.kt) drives the same commands as the buttons. */
@@ -338,11 +585,10 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         override fun setMode(mode: String) {
             val d = Drive.values().firstOrNull { it.name.equals(mode, true) } ?: return
-            val g = modeGroup ?: return
-            (0 until g.childCount).map { g.getChildAt(it) }.firstOrNull { it.tag == d }?.let { g.check(it.id) }
+            runOnUiThread { if (drive != d) setDrive(d) }
         }
         override fun mode() = drive.name.lowercase()
-        override fun clearGoal() { goal = null; path = null; mapView.goal = null; mapView.path = null; sendStop() }
+        override fun clearGoal() = this@NavActivity.clearGoal()
         override fun busy() = task is Task.Move || task is Task.Turn || (drive == Drive.AUTO && goal != null && !arrivedSaid)
         override fun statusJSON(): JSONObject {
             val o = JSONObject().put("mode", mode()).put("robot_connected", link.connected).put("robot", link.robotName)
@@ -389,7 +635,11 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         requestPermissions(blePerms(), 7)
     }
 
-    private fun status(s: String) = runOnUiThread { statusView.text = s }
+    private fun status(s: String) = runOnUiThread {
+        if (!::statusView.isInitialized) return@runOnUiThread
+        statusView.text = s; statusView.visibility = View.VISIBLE
+        statusView.removeCallbacks(hideToast); statusView.postDelayed(hideToast, 8000)
+    }
 
     private fun setGoal(x: Float, z: Float, src: String) {
         goal = floatArrayOf(x, z); path = null; lastPlanMs = 0; arrivedSaid = false

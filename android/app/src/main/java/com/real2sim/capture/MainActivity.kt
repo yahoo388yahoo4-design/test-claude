@@ -7,13 +7,10 @@ import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.text.InputType
+import android.view.View
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -24,9 +21,15 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
-    private lateinit var modeSpinner: Spinner
-    private lateinit var btnRecord: Button
+    private lateinit var statsView: TextView
+    private lateinit var modeControl: SegmentedControl
+    private lateinit var modeTitle: TextView
+    private lateinit var btnRecord: RecordButton
+    private lateinit var recTimer: TextView
     private lateinit var previewHost: FrameLayout
+    private lateinit var topBar: View
+    private lateinit var bottomBar: View
+    private lateinit var settings: CaptureSettings
     private var writer: SessionWriter? = null
     private var sensors: SensorRecorder? = null
     private var ar: ArRecorder? = null
@@ -35,44 +38,44 @@ class MainActivity : AppCompatActivity() {
     private var wake: PowerManager.WakeLock? = null
     private var arInstallRequested = false
     private var mapView: MapView? = null
-    private var hud: HudView? = null
     private var coverage: CoverageView? = null
+    private var recStartMs = 0L
     private val ui = android.os.Handler(android.os.Looper.getMainLooper())
     private val bgExec = java.util.concurrent.Executors.newSingleThreadExecutor()
     @Volatile private var liveBusy = false
 
-    private val modes = listOf("A: ARCore RGB-D + poses", "B: Camera2 multi-cam + RAW (no poses)", "Sensors only (IMU/GNSS)")
-
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.edgeToEdge(this)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        settings = CaptureSettings(this)
         statusView = findViewById(R.id.status)
-        modeSpinner = findViewById(R.id.modeSpinner)
+        statsView = findViewById(R.id.stats)
+        modeControl = findViewById(R.id.modeControl)
+        modeTitle = findViewById(R.id.modeTitle)
         btnRecord = findViewById(R.id.btnRecord)
+        recTimer = findViewById(R.id.recTimer)
         previewHost = findViewById(R.id.previewHost)
-        modeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, modes)
-        val prefs = getSharedPreferences("capture", Context.MODE_PRIVATE)
-        val url = findViewById<EditText>(R.id.uploadUrl)
-        url.setText(prefs.getString("upload_url", ""))
+        topBar = findViewById(R.id.topBar)
+        bottomBar = findViewById(R.id.bottomBar)
+        Ui.applyInsets(topBar, top = true, bottom = false)
+        Ui.applyInsets(bottomBar, top = false, bottom = true)
+        modeControl.setItems(CaptureMode.values().map { it.shortTitle }, settings.mode.ordinal)
+        modeControl.onSelect = { i -> settings.mode = CaptureMode.values()[i]; modeChanged() }
+        modeChanged()
 
         btnRecord.setOnClickListener { if (writer == null) startRecording() else stopRecording() }
-        findViewById<Button>(R.id.btnCams).setOnClickListener { dumpCameras() }
-        findViewById<Button>(R.id.btnNav).setOnClickListener {
+        findViewById<View>(R.id.btnSettings).setOnClickListener {
+            if (writer != null) { status("stop recording first"); return@setOnClickListener }
+            showSettings()
+        }
+        findViewById<View>(R.id.btnNav).setOnClickListener {
             if (writer != null) { status("stop recording first"); return@setOnClickListener }
             startActivity(android.content.Intent(this, NavActivity::class.java))
         }
-        findViewById<Button>(R.id.btnSessions).setOnClickListener {
+        findViewById<View>(R.id.btnSessions).setOnClickListener {
             if (writer != null) { status("stop recording first"); return@setOnClickListener }
             startActivity(android.content.Intent(this, SessionsActivity::class.java))
-        }
-        findViewById<Button>(R.id.btnUpload).setOnClickListener {
-            val base = url.text.toString()
-            prefs.edit().putString("upload_url", base).apply()
-            val dir = lastSession ?: latestSession()
-            if (dir == null || base.isBlank()) { status("nothing to upload / no URL"); return@setOnClickListener }
-            thread(name = "upload") {
-                try { Uploader.upload(dir, base) { status(it) } } catch (e: Exception) { status("upload failed: $e") }
-            }
         }
         requestPerms()
         if (Build.VERSION.SDK_INT >= 30 && !SessionWriter.allFilesAccess()) {
@@ -84,9 +87,63 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun modeChanged() {
+        modeTitle.text = settings.mode.title
+        findViewById<TextView>(R.id.idleText).text = if (settings.mode == CaptureMode.SENSORS)
+            "Sensors only: IMU, GNSS, barometer, … (no camera)" else getString(R.string.idle_hint)
+    }
+
+    /** Settings sheet, grouped like the iOS SettingsView form; every change is saved at once. */
+    private fun showSettings() {
+        val s = settings
+        val root = SessionWriter.sessionsRoot(this)
+        Sheet(this, "Settings").form {
+            section("Mode") {
+                inlinePicker(CaptureMode.values().map { it.title }, s.mode.ordinal) { i ->
+                    s.mode = CaptureMode.values()[i]; modeControl.select(i); modeChanged()
+                }
+            }
+            section("Capture", "IMU (accelerometer, gyro, magnetometer at the fastest rate), barometer, GNSS, thermal and battery are always recorded.") {
+                toggle("Audio track", s.recordAudio) { s.recordAudio = it }
+                toggle("Full-res stills", s.hiResStills, "Mode A: shared camera, a JPEG every 0.5 s") { s.hiResStills = it }
+            }
+            section("Depth and poses (mode A)", "ARCore depth (ToF where the phone has one, depth-from-motion otherwise), raw and smoothed, plus poses, intrinsics and planes are always saved.") {
+                toggle("ARCore session recording (.mp4)", s.arcoreMp4, "Replayable ARCore dataset alongside our own files") { s.arcoreMp4 = it }
+            }
+            section("Camera") {
+                toggle("Lock AE / AF / AWB", s.lock, "Modes A and B") { s.lock = it }
+                toggle("RAW DNG", s.rawDng, "Mode B: one DNG per second from the main lens") { s.rawDng = it }
+                toggle("OIS off", s.oisOff, "Mode B: stabilisation off for stable intrinsics") { s.oisOff = it }
+                button("Dump camera inventory") { dumpCameras() }
+            }
+            section("Location", if (BuildConfig.HAS_ARCORE_API_KEY) "GPS is always recorded." else
+                "GPS is always recorded. Geospatial needs an app built with -PARCORE_API_KEY=…") {
+                toggle("ARCore Geospatial (Earth pose)", s.geospatial, "Mode A, outdoors with Street View coverage") { s.geospatial = it }
+            }
+            section("Upload receiver (tools/receiver.py)",
+                "Or copy sessions with adb: adb pull ${root.absolutePath.replace("/storage/emulated/0", "/sdcard")}/") {
+                field("http://192.168.1.20:8765#token", s.uploadUrl, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI) { s.uploadUrl = it }
+                button("Upload last session") { uploadLast() }
+            }
+            section(null) {
+                value("Sessions", root.name)
+                note(root.absolutePath)
+            }
+        }.show()
+    }
+
+    private fun uploadLast() {
+        val base = settings.uploadUrl
+        val dir = lastSession ?: latestSession()
+        if (dir == null || base.isBlank()) { status("nothing to upload / no URL"); return }
+        thread(name = "upload") {
+            try { Uploader.upload(dir, base) { status(it) } } catch (e: Exception) { status("upload failed: $e") }
+        }
+    }
+
     private fun showRoot() {
         val root = SessionWriter.sessionsRoot(this)
-        status("sessions: ${root.absolutePath}\nadb pull ${root.absolutePath.replace("/storage/emulated/0", "/sdcard")}/")
+        status("Ready · sessions in ${root.absolutePath.replace("/storage/emulated/0", "/sdcard")}")
     }
 
     override fun onResume() {
@@ -111,48 +168,70 @@ class MainActivity : AppCompatActivity() {
 
     private fun status(s: String) = runOnUiThread { statusView.text = s }
 
-    private fun cb(id: Int) = findViewById<CheckBox>(id).isChecked
+    private fun stats(lines: List<String>) = runOnUiThread {
+        statsView.text = lines.joinToString("\n")
+        statsView.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
+    }
 
     private fun startRecording() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPerms(); return }
-        val modeIdx = modeSpinner.selectedItemPosition
-        val mode = when (modeIdx) { 0 -> "arcore_rgbd"; 1 -> "multicam"; else -> "sensors" }
-        val w = SessionWriter(this, mode)
+        val s = settings
+        val m = s.mode
+        val w = SessionWriter(this, m.id)
         writer = w
-        sensors = SensorRecorder(this, w).also { it.start(recordAudio = cb(R.id.cbAudio)) }
+        sensors = SensorRecorder(this, w).also { it.start(recordAudio = s.recordAudio) }
         try {
-            when (modeIdx) {
-                0 -> {
-                    val r = ArRecorder(this, w, ArOptions(hiResStills = cb(R.id.cbHiRes), arcoreMp4 = cb(R.id.cbArRec),
-                        lockFocus = cb(R.id.cbLock), geospatial = cb(R.id.cbGeo)), ::status)
+            when (m) {
+                CaptureMode.RGBD -> {
+                    val r = ArRecorder(this, w, ArOptions(hiResStills = s.hiResStills, arcoreMp4 = s.arcoreMp4,
+                        lockFocus = s.lock, geospatial = s.geospatial), ::status)
                     r.create()?.let { err -> status(err); abort(); return }
                     previewHost.addView(r.view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                     r.start()
                     ar = r
                     addLiveViews(r)
                 }
-                1 -> {
-                    val r = Camera2Recorder(this, w, Camera2Options(rawDng = cb(R.id.cbRaw), lock = cb(R.id.cbLock), oisOff = cb(R.id.cbOisOff)), ::status)
+                CaptureMode.MULTICAM -> {
+                    val r = Camera2Recorder(this, w, Camera2Options(rawDng = s.rawDng, lock = s.lock, oisOff = s.oisOff), ::status)
                     // live preview behind the coverage overlay (its surface must exist before the session is configured)
                     previewHost.addView(r.previewView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, android.view.Gravity.CENTER))
                     val err = try { r.start() } catch (e: Exception) { "camera start failed: $e" }
                     if (err != null) { previewHost.removeView(r.previewView); status(err); abort(); return }
                     cam2 = r
                     val cv = CoverageView(this)
-                    previewHost.addView(cv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply { topMargin = dp(150); bottomMargin = dp(130) })
+                    previewHost.addView(cv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                        topMargin = topBar.bottom + dp(8); bottomMargin = bottomBar.height })
                     cv.recording = true; cv.start()
                     coverage = cv
                     ui.postDelayed(liveTick, 500)
                 }
+                CaptureMode.SENSORS -> {}
             }
         } catch (e: Exception) {
             status("start failed: $e"); abort(); return
         }
         @Suppress("DEPRECATION")
         wake = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "capture:rec").apply { acquire(3 * 3600 * 1000L) }
-        btnRecord.text = "Stop"
-        modeSpinner.isEnabled = false
-        findViewById<Button>(R.id.btnSessions).isEnabled = false
+        setRecordingUi(true)
+        status("Recording · ${m.title}")
+    }
+
+    /** Record button morphs to a square, timer capsule on, the other controls off (as on iOS). */
+    private fun setRecordingUi(on: Boolean) {
+        btnRecord.recording = on
+        modeControl.isEnabled = !on
+        findViewById<View>(R.id.idleHint).visibility = if (on && settings.mode != CaptureMode.SENSORS) View.GONE else View.VISIBLE
+        for (id in intArrayOf(R.id.btnSessions, R.id.btnSettings, R.id.btnNav)) findViewById<View>(id).apply { isEnabled = !on; alpha = if (on) 0.4f else 1f }
+        recTimer.visibility = if (on) View.VISIBLE else View.GONE
+        ui.removeCallbacks(timerTick)
+        if (on) { recStartMs = android.os.SystemClock.elapsedRealtime(); timerTick.run() } else stats(emptyList())
+    }
+
+    private val timerTick = object : Runnable {
+        override fun run() {
+            recTimer.text = "\u25CF  " + Ui.fmtClock(android.os.SystemClock.elapsedRealtime() - recStartMs)
+            if (writer != null) ui.postDelayed(this, 500)
+        }
     }
 
     private fun abort() {
@@ -166,7 +245,6 @@ class MainActivity : AppCompatActivity() {
         status("stopping…")
         ui.removeCallbacks(liveTick)
         mapView?.let { previewHost.removeView(it) }; mapView = null
-        hud?.let { previewHost.removeView(it) }; hud = null
         coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
         ar?.let { it.stop(); previewHost.removeView(it.view) }; ar = null
         cam2?.let { it.stop(); previewHost.removeView(it.previewView) }; cam2 = null
@@ -176,41 +254,43 @@ class MainActivity : AppCompatActivity() {
         writer = null
         lastSession = w.dir
         wake?.let { if (it.isHeld) it.release() }; wake = null
-        btnRecord.text = "Record"; btnRecord.isEnabled = true; modeSpinner.isEnabled = true
-        findViewById<Button>(R.id.btnSessions).isEnabled = true
-        status("saved ${w.dir.name}\n$sum")
+        btnRecord.isEnabled = true
+        setRecordingUi(false)
+        status("Saved ${w.dir.name}\n$sum")
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    /** Mode A live view: 3D points are drawn by ArRecorder; here the top-down map and the stats HUD. */
+    /** Mode A live view: 3D points are drawn by ArRecorder; here the top-down map, and the stats in the status card. */
     private fun addLiveViews(r: ArRecorder) {
-        val h = HudView(this)
-        previewHost.addView(h, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply { topMargin = dp(150) })
-        val mv = MapView(this).apply { title = "captured so far (long-press: 3D points on/off)" }
+        val mv = MapView(this).apply {
+            title = "captured so far (long-press: 3D points)"
+            background = Ui.material(this@MainActivity, 12f); clipToOutline = true
+        }
         val side = (resources.displayMetrics.widthPixels * 0.42f).toInt()
         previewHost.addView(mv, FrameLayout.LayoutParams(side, side).apply {
-            gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = dp(160); rightMargin = dp(8) })
+            gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = topBar.bottom + dp(8); rightMargin = dp(16) })
         mv.setOnLongClickListener { r.showCloud = !r.showCloud; true }
-        hud = h; mapView = mv
+        mapView = mv
         ui.postDelayed(liveTick, 500)
     }
 
     private val liveTick = object : Runnable {
         override fun run() {
             cam2?.let { c -> coverage?.status = c.liveStatus() }
-            val r = ar; val mv = mapView; val h = hud
-            if (r != null && mv != null && h != null && !liveBusy) {
+            val r = ar; val mv = mapView
+            if (r != null && mv != null && !liveBusy) {
                 liveBusy = true
                 bgExec.execute {
                     try {
                         val bm = r.map.bitmap()
                         val t = synchronized(r.map) { ArrayList(r.map.traj) }
-                        val st = HudView.State().apply { lines = r.liveStats() }
+                        val lines = r.liveStats()
                         runOnUiThread {
+                            if (mapView !== mv) return@runOnUiThread
                             mv.setMap(bm?.first, bm?.second)
                             t.lastOrNull()?.let { p -> mv.setPose(p[0], p[2], r.heading(), t) }
-                            h.state = st
+                            stats(lines)
                         }
                     } finally { liveBusy = false }
                 }
@@ -239,7 +319,8 @@ class MainActivity : AppCompatActivity() {
                         "raw=${c.optBoolean("_has_raw_sensor")} ${if (c.optBoolean("_not_in_id_list")) "HIDDEN " else ""}" +
                         caps.filter { it in setOf("LOGICAL_MULTI_CAMERA", "DEPTH_OUTPUT", "RAW", "MANUAL_SENSOR") }.joinToString(",")
                 }.joinToString("\n")
-                status("${f.name}\nconcurrent=${inv.optJSONArray("concurrent_camera_ids")}\n$lines")
+                status("wrote ${f.name}")
+                runOnUiThread { Ui.showText(this, "Cameras", "${f.absolutePath}\nconcurrent=${inv.optJSONArray("concurrent_camera_ids")}\n\n$lines") }
             } catch (e: Exception) { status("camera dump failed: $e") }
         }
     }

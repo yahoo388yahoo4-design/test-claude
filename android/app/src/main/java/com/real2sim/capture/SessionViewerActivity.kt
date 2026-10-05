@@ -13,10 +13,7 @@ import android.view.Gravity
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.CheckBox
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -53,30 +50,34 @@ class SessionViewerActivity : AppCompatActivity() {
     private val depthExec = Executors.newSingleThreadExecutor()
     private lateinit var dir: File
     private lateinit var content: FrameLayout
-    private lateinit var tabBar: LinearLayout
+    private lateinit var tabBar: SegmentedControl
     private lateinit var transport: LinearLayout
     private val playback = Playback(ui)
     private var data: ViewerData? = null
     private val tabs = LinkedHashMap<String, View?>()
-    private val tabButtons = HashMap<String, Button>()
+    private val tabNames = listOf("Video", "3D", "Map", "Sensors", "Info")
     private var current = ""
     private var scene: SceneView? = null
     private var rotation = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.edgeToEdge(this)
         super.onCreate(savedInstanceState)
         dir = File(intent.getStringExtra(EXTRA_DIR) ?: run { finish(); return })
+        // Laid out like the iOS SessionViewer: inline title with a back button, segmented tabs, content,
+        // transport bar at the bottom.
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
-        root.addView(TextView(this).apply {
-            text = dir.name; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.MONOSPACE
-            setPadding(dp(12), dp(10), dp(12), dp(4))
-        })
-        tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(HorizontalScrollView(this).apply { addView(tabBar) })
+        root.addView(Ui.navBar(this, dir.name, Ui.barButton(this, "Sessions", chevron = true) { finish() }, null))
+        tabBar = SegmentedControl(this).apply { setItems(tabNames); isEnabled = false }
+        root.addView(tabBar, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(16), dp(4), dp(16), dp(8)) })
         content = FrameLayout(this)
         root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        transport = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(4), dp(8), dp(8)) }
+        transport = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(6), dp(12), dp(8))
+            setBackgroundColor(Ui.BG_SHEET)
+        }
         root.addView(transport)
+        Ui.applyInsets(root, top = true, bottom = true)
         setContentView(root)
         content.addView(text("Loading…"))
         io.execute {
@@ -106,14 +107,16 @@ class SessionViewerActivity : AppCompatActivity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun text(s: String, size: Float = 13f, color: Int = Color.LTGRAY, mono: Boolean = false) = TextView(this).apply {
-        text = s; textSize = size; setTextColor(color); setPadding(dp(12), dp(6), dp(12), dp(6))
-        if (mono) typeface = Typeface.MONOSPACE
+    private fun text(s: String, size: Float = 13f, color: Int = Ui.SECONDARY, mono: Boolean = false) = TextView(this).apply {
+        text = s; textSize = size; setTextColor(color); setPadding(dp(16), dp(6), dp(16), dp(6))
+        typeface = if (mono) Typeface.MONOSPACE else Ui.REGULAR
+        fontFeatureSettings = Ui.TNUM
+        setLineSpacing(0f, 1.1f)
     }
 
-    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label; isAllCaps = false; minWidth = 0; minimumWidth = 0; setPadding(dp(10), 0, dp(10), 0)
-        setOnClickListener { onClick() }
+    /** iOS `.bordered` button: blue text on a translucent grey rounded rect. */
+    private fun button(label: String, onClick: () -> Unit): TextView = Ui.borderedButton(this, label) { onClick() }.apply {
+        layoutParams = LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }
     }
 
     private fun build(d: ViewerData) {
@@ -121,12 +124,9 @@ class SessionViewerActivity : AppCompatActivity() {
         rotation = getSharedPreferences("viewer", Context.MODE_PRIVATE).getInt("rot_${d.mode}", d.defaultRotation)
         for (v in d.videos) playback.tracks.add(Playback.Track(v.name, v.file, v.firstT - d.t0))
         playback.duration = d.duration
-        for (name in listOf("Video", "3D", "Map", "Sensors", "Info")) {
-            tabs[name] = null
-            val b = button(name) { show(name) }
-            tabButtons[name] = b
-            tabBar.addView(b)
-        }
+        for (name in tabNames) tabs[name] = null
+        tabBar.isEnabled = true
+        tabBar.onSelect = { i -> show(tabNames[i]) }
         buildTransport()
         show("Video")
     }
@@ -134,7 +134,7 @@ class SessionViewerActivity : AppCompatActivity() {
     private fun show(name: String) {
         val d = data ?: return
         current = name
-        for ((n, b) in tabButtons) b.alpha = if (n == name) 1f else 0.55f
+        tabBar.select(tabNames.indexOf(name))
         if (tabs[name] == null) {
             val v = when (name) {
                 "Video" -> videoTab(d)
@@ -154,16 +154,30 @@ class SessionViewerActivity : AppCompatActivity() {
     }
 
     private fun buildTransport() {
-        val play = button("Play") { playback.toggle() }
-        val seek = SeekBar(this).apply { max = 1000 }
-        val label = TextView(this).apply { setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.MONOSPACE; setPadding(dp(6), 0, dp(6), 0) }
+        val play = ImageView(this).apply {
+            setImageResource(R.drawable.ic_play); contentDescription = "Play"
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = Ui.pressable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT), Ui.oval(Color.WHITE))
+            setOnClickListener { playback.toggle() }
+        }
+        val seek = SeekBar(this).apply {
+            max = 1000
+            progressTintList = android.content.res.ColorStateList.valueOf(Ui.BLUE)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(120, 120, 128))
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        }
+        val label = Ui.label(this, "", 12f, Ui.SECONDARY, digits = true).apply { setPadding(dp(4), 0, dp(8), 0) }
         val speeds = floatArrayOf(0.25f, 0.5f, 1f, 2f, 4f)
-        val speed = button("1x") {}
+        val speed = Ui.label(this, "1x", 13f, Color.WHITE, Ui.SEMIBOLD, digits = true).apply {
+            gravity = Gravity.CENTER; setPadding(dp(10), dp(5), dp(10), dp(5))
+            background = Ui.pressable(Ui.rounded(Ui.BG_FILL, Ui.dp(this@SessionViewerActivity, 12f)))
+            contentDescription = "Playback speed"
+        }
         speed.setOnClickListener {
             val k = (speeds.indexOfFirst { it == playback.speed } + 1) % speeds.size
             playback.setSpeed(speeds[k])
         }
-        transport.addView(play)
+        transport.addView(play, LinearLayout.LayoutParams(dp(40), dp(40)))
         transport.addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         transport.addView(label)
         transport.addView(speed)
@@ -174,7 +188,8 @@ class SessionViewerActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(s: SeekBar) { scrubbing = false }
         })
         fun refresh() {
-            play.text = if (playback.playing) "Pause" else "Play"
+            play.setImageResource(if (playback.playing) R.drawable.ic_pause else R.drawable.ic_play)
+            play.contentDescription = if (playback.playing) "Pause" else "Play"
             speed.text = (if (playback.speed < 1) String.format(Locale.US, "%.2gx", playback.speed) else String.format(Locale.US, "%.0fx", playback.speed))
             label.text = String.format(Locale.US, "%.1f / %.1f s", playback.time, playback.duration)
             if (!scrubbing && playback.duration > 0) seek.progress = (playback.time / playback.duration * 1000).toInt()
@@ -279,10 +294,8 @@ class SessionViewerActivity : AppCompatActivity() {
             }
         }
         if (f.depth.isNotEmpty() || f.smooth.isNotEmpty()) {
-            row.addView(CheckBox(this).apply {
-                text = "Depth overlay"; setTextColor(Color.WHITE); isChecked = showDepth
-                setOnCheckedChangeListener { _, c -> showDepth = c; updateDepth(true) }
-            })
+            row.addView(Ui.label(this, "Depth", 15f, Color.WHITE).apply { setPadding(dp(12), 0, dp(6), 0) })
+            row.addView(Ui.toggle(this, showDepth) { c -> showDepth = c; updateDepth(true) }.apply { contentDescription = "Depth overlay" })
             if (f.depth.isNotEmpty() && f.smooth.isNotEmpty()) row.addView(button("raw") {}.also { b ->
                 b.setOnClickListener { useSmooth = !useSmooth; b.text = if (useSmooth) "smoothed" else "raw"; shown = -2; updateDepth(true) }
             })

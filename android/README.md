@@ -84,6 +84,35 @@ Options (checkboxes):
   Otherwise it is skipped. It records the Earth/VPS camera pose (lat/lon/alt/heading quaternion and
   accuracies) per frame.
 
+### Screens (laid out like the iPhone app)
+
+The UI follows the iOS app (`ios/R2SCapture/ContentView.swift`, `SessionViewer.swift`,
+`Nav/NavModeView.swift`): dark, full-bleed camera, translucent rounded cards, iOS blue / red / green,
+tabular digits for numbers. Shared pieces are in `Ui.kt` (segmented control, record button, round icon
+buttons, bottom sheets with inset-grouped forms, swipeable list rows) and `NavWidgets.kt` (radar, speed
+gauge, distance chips).
+
+* **Main screen.** Status card on top (with live stats while recording) and a red timer capsule while
+  recording; at the bottom the segmented mode picker (RGB-D / Multi-cam / Sensors), the mode's full title,
+  and **Sessions** · **Record** (white ring, red disc that turns into a rounded square while recording) ·
+  **Settings** · **Nav**. The camera opens when recording starts (as before), so the idle screen is black.
+* **Settings sheet.** Mode, Capture (audio, full-res stills), Depth and poses (ARCore recording),
+  Camera (lock AE/AF/AWB, RAW DNG, OIS off, camera inventory), Location (Geospatial), Upload receiver
+  (URL, upload last session). Saved at once in SharedPreferences (`CaptureSettings.kt`).
+* **Sessions.** Large title, one inset-grouped list (name, mode · duration · size · frames). Tap to open,
+  swipe left for **Upload** / **Delete**, long-press for the same as a menu. The receiver URL is the
+  Settings one (tap "Receiver" to change it).
+* **Viewer.** Back button and inline title, segmented tabs (Video / 3D / Map / Sensors / Info),
+  transport bar (play / pause, scrubber, time, speed) at the bottom.
+* **Navigation.** Top bar (close, tracking, map, robot link, settings), instruction banner with a
+  direction arrow, speed gauge and stats, voice button, and one bottom panel: radar + minimap, distance
+  chips, Guide / Auto / Manual, joystick + move / turn steppers in Manual, and go-to · GO (Auto) · STOP ·
+  save map. Map loading / aligning, the robot link, E-stop, robot and safety parameters and guidance
+  toggles are in the settings sheet (parameters apply when it closes).
+
+`./gradlew testDebugUnitTest` also renders these screens off-device with Robolectric
+(`UiScreenshotTest`) to `app/build/screenshots/`.
+
 ### Live view while recording
 
 * **Mode A** draws what has been captured so far on top of the camera image: a 3D point cloud of the
@@ -107,14 +136,14 @@ Options (checkboxes):
 
 ### Navigation mode (phone on a robot)
 
-The **Navigate** button opens a separate screen for driving a two-wheeled robot with the phone as its
+The **Nav** button opens a separate screen for driving a two-wheeled robot with the phone as its
 only sensor. It talks to the robot with the same protocol as the iPhone app
 ([`robot/PROTOCOL.md`](../robot/PROTOCOL.md)), so the same receivers work with both phones:
 `robot/receiver.py` (Python: sim, serial, Raspberry Pi GPIO), `robot/esp32_diffdrive` (ESP32 with Wi-Fi
 and BLE) and `robot/serial_motor` (Arduino bridge). See [`NAVIGATION.md`](../NAVIGATION.md).
 
 1. **Map.** Walk or drive around; ARCore depth builds a 5 cm occupancy grid and a point cloud. Or press
-   **Load map** to bring back a map saved by mode A or by an earlier navigation run, then **Align**
+   **Load map** (settings sheet) to bring back a map saved by mode A or by an earlier navigation run, then **Align**
    (scan matching of the live map against the saved one) or **Same start** (you started where the
    saved map started).
 2. **Goal.** Tap the top-down map, or tap the floor in the camera view. A* plans a path that keeps the
@@ -147,8 +176,8 @@ support it (else the built-in command matcher) and the phone's text-to-speech. A
 ### Sessions and playback viewer
 
 **Sessions** (main screen, disabled while recording) lists the recorded sessions, newest first, with
-mode, duration, size and frame count. Each one has **Open**, **Upload** (the receiver URL field is the
-same setting as on the main screen) and **Delete** (asks first). **Open** plays the session back on
+mode, duration, size and frame count. Tap one to open it; swipe left (or long-press) for **Upload** (to
+the receiver URL from Settings) and **Delete** (asks first). Opening it plays the session back on
 the phone, like the iPhone app's viewer (`ios/R2SCapture/SessionViewer.swift`):
 
 * **Video.** Mode A plays `video.mp4` with the ARCore depth map (raw or smoothed) alpha-blended on
