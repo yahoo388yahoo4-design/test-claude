@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -177,6 +178,11 @@ async def run(a) -> int:
         out = Path(a.convert).expanduser()
         # new sessions, plus earlier ones that were never converted
         for s in [s for s in ready if s in new_sessions or not (out / s.name).exists()]:
+            if local_mode(s) == "multicam":
+                # No ARKit poses in multicam; ARKitScenes/LiteReality need them (recover_poses.py first).
+                print(f"Skipping convert for {s.name}: multicam has no camera poses "
+                      f"(run tools/recover_poses.py on it first if you need ARKitScenes/LiteReality)")
+                continue
             print(f"Converting {s.name} -> {out / s.name}")
             r = subprocess.run([sys.executable, str(HERE / "convert.py"), str(s), "--out", str(out / s.name)])
             if r.returncode != 0:
@@ -193,6 +199,17 @@ async def run(a) -> int:
 
 
 # MARK: publish to the datasets hub on fleet-3090
+
+def local_mode(session: Path) -> str:
+    try:
+        return json.loads((session / "session.json").read_text()).get("mode", "")
+    except Exception:
+        return ""
+
+
+def mark_published(s: Path, a, note: str = "") -> None:
+    (s / PUBLISHED).write_text(json.dumps({"host": a.host, "hub": a.hub, "space": a.space, "note": note,
+                                           "time": time.strftime("%Y-%m-%dT%H:%M:%S")}))
 
 def ssh_base(a) -> list[str]:
     cmd = ["ssh", "-o", "BatchMode=yes"]
@@ -261,19 +278,32 @@ def publish(sessions: list[Path], a) -> int:
         remote(a, "command -v rsync", capture=True).returncode == 0
     if not use_rsync:
         print(f"  rsync not available on {'this computer' if not shutil.which('rsync') else a.host}; copying with tar over ssh")
+    export_help = remote(a, f"{py}; cd {tools} && $PY hub_export.py --help", capture=True).stdout
     for s in sessions:
+        exported = f"{a.hub.rstrip('/')}/sessions/{s.name}"
+        exists = remote(a, f"test -d {shlex.quote(exported)}", capture=True).returncode == 0
+        if exists and not a.republish:
+            print(f"{s.name}: already on the hub, skipping (use --republish to replace it)")
+            mark_published(s, a, "found on hub")
+            continue
         print(f"Publishing {s.name} to {a.host}:{a.hub} (space {a.space})")
         if not copy_to_remote(a, s, f"{incoming}/{s.name}", use_rsync):
             failed += 1
             continue
+        extra = ""
+        if exists:   # --republish: hub_export.py refuses to write into an existing session folder
+            flag = next((f for f in ("--overwrite", "--force") if f in export_help), None)
+            if flag:
+                extra = f" {flag}"
+            elif re.fullmatch(r"[\w.-]+", s.name):
+                remote(a, f"rm -rf {shlex.quote(exported)}")   # only this session's previous export
         r = remote(a, f"{py}; cd {tools} && $PY hub_export.py {shlex.quote(f'{incoming}/{s.name}')} "
-                      f"--out {shlex.quote(a.hub)} --space {shlex.quote(a.space)}")
+                      f"--out {shlex.quote(a.hub)} --space {shlex.quote(a.space)}{extra}")
         if r.returncode != 0:
             print(f"  hub_export.py failed (exit {r.returncode})")
             failed += 1
             continue
-        (s / PUBLISHED).write_text(json.dumps({"host": a.host, "hub": a.hub, "space": a.space,
-                                               "time": time.strftime("%Y-%m-%dT%H:%M:%S")}))
+        mark_published(s, a)
     usage = remote(a, f"{py}; cd {tools} && $PY hub_align.py --help", capture=True).stdout
     args = " ".join(shlex.quote(x) for x in align_args(usage, a.hub, a.space))
     print(f"Aligning space {a.space}: hub_align.py {args}")
@@ -298,6 +328,8 @@ def main() -> int:
     ap.add_argument("--host", default="fleet-3090", help="ssh host of the datasets hub (default fleet-3090)")
     ap.add_argument("--ssh-key", help="ssh private key, if ~/.ssh/config doesn't set one for the host")
     ap.add_argument("--hub", default="/data/datasets/r2s-captures", help="dataset folder on the hub host")
+    ap.add_argument("--republish", action="store_true",
+                    help="re-export sessions that are already on the hub (replaces their hub copy)")
     ap.add_argument("--raw-dir", help="where raw sessions go on the hub host (default HUB/raw/SPACE)")
     ap.add_argument("--list", action="store_true", help="only list the sessions on the phone")
     ap.add_argument("--session", nargs="+", help="copy only these session folder names")
