@@ -25,8 +25,8 @@ cd ~/r2s-capture && git pull                    # get the latest tools
 For every finished session not yet on this computer it:
 1. copies it to `~/captures/<session>/` (nothing to tap in the app),
 2. converts it to `~/converted/<session>/` (ARKitScenes + LiteReality),
-3. publishes it to the datasets hub on fleet-3090: rsync (or tar over ssh if rsync is missing) to
-   `/root/real2sim-claude/work/incoming/`, then
+3. publishes it to the datasets hub on fleet-3090: copies the raw session (rsync, or tar over ssh) into
+   `/data/datasets/r2s-captures/raw/<space>/`, then runs
    `hub_export.py` into `/data/datasets/r2s-captures` and `hub_align.py` for the space, so all captures of
    one room line up. It shows up at http://192.168.1.188:8062/datasets/r2s-captures.
 

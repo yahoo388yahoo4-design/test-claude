@@ -10,7 +10,8 @@
 Steps for each session that is new on this computer:
   1. copy   the phone's Documents/sessions/<session> -> ~/captures/<session>
   2. convert  tools/convert.py -> ~/converted/<session>/ (ARKitScenes + LiteReality)
-  3. publish  rsync (or tar over ssh if rsync is missing) to fleet-3090 /root/real2sim-claude/work/incoming/<session>, then on fleet-3090 run
+  3. publish  rsync (or tar over ssh if rsync is missing) the raw session to fleet-3090
+             /data/datasets/r2s-captures/raw/<space>/<session>, then on fleet-3090 run
              tools/hub_export.py into /data/datasets/r2s-captures with --space, and tools/hub_align.py
              for that space so captures of one room share one frame. The hub picks it up without a restart.
 
@@ -222,6 +223,10 @@ def align_args(usage: str, hub: str, space: str) -> list[str]:
 
 
 def copy_to_remote(a, src: Path, dst: str, use_rsync: bool) -> bool:
+    mk = remote(a, f"mkdir -p {shlex.quote(dst)}", capture=True)
+    if mk.returncode != 0:
+        print(f"  can't create {dst} on {a.host}: {(mk.stderr or mk.stdout).strip()[:200]}")
+        return False
     if use_rsync:
         rsh = " ".join(shlex.quote(x) for x in ssh_base(a))
         r = subprocess.run(["rsync", "-a", "--partial", "--exclude", PUBLISHED, "-e", rsh, f"{src}/", f"{a.host}:{dst}/"])
@@ -249,7 +254,8 @@ def publish(sessions: list[Path], a) -> int:
               f"  ssh said: {(check.stderr or check.stdout).strip()[:300]}")
         return 1
     failed = 0
-    incoming = f"{REMOTE_ROOT}/work/incoming"
+    # Raw sessions live inside the dataset, next to the browser exports: <hub>/raw/<space>/<session>
+    incoming = a.raw_dir or f"{a.hub.rstrip('/')}/raw/{a.space}"
     # rsync needs to be installed on both ends; otherwise stream a tar archive over ssh.
     use_rsync = shutil.which("rsync") is not None and \
         remote(a, "command -v rsync", capture=True).returncode == 0
@@ -292,6 +298,7 @@ def main() -> int:
     ap.add_argument("--host", default="fleet-3090", help="ssh host of the datasets hub (default fleet-3090)")
     ap.add_argument("--ssh-key", help="ssh private key, if ~/.ssh/config doesn't set one for the host")
     ap.add_argument("--hub", default="/data/datasets/r2s-captures", help="dataset folder on the hub host")
+    ap.add_argument("--raw-dir", help="where raw sessions go on the hub host (default HUB/raw/SPACE)")
     ap.add_argument("--list", action="store_true", help="only list the sessions on the phone")
     ap.add_argument("--session", nargs="+", help="copy only these session folder names")
     ap.add_argument("--include-incomplete", action="store_true", help="also copy sessions without complete=true")
