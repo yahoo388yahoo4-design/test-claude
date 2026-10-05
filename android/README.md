@@ -84,12 +84,46 @@ Options (checkboxes):
   Otherwise it is skipped. It records the Earth/VPS camera pose (lat/lon/alt/heading quaternion and
   accuracies) per frame.
 
+### Screens (laid out like the iPhone app)
+
+The UI follows the iOS app (`ios/R2SCapture/ContentView.swift`, `SessionViewer.swift`,
+`Nav/NavModeView.swift`): dark, full-bleed camera, translucent rounded cards, iOS blue / red / green,
+tabular digits for numbers. Shared pieces are in `Ui.kt` (segmented control, record button, round icon
+buttons, bottom sheets with inset-grouped forms, swipeable list rows) and `NavWidgets.kt` (radar, speed
+gauge, distance chips).
+
+* **Main screen.** Status card on top (with live stats while recording) and a red timer capsule while
+  recording; at the bottom the segmented mode picker (RGB-D / Multi-cam / Sensors), the mode's full title,
+  and **Sessions** · **Record** (white ring, red disc that turns into a rounded square while recording) ·
+  **Settings** · **Nav**. While idle the camera is live, as on iOS (`IdlePreview.kt`, nothing is
+  written): mode A runs a preview-only ARCore session, modes B and sensors (and phones without ARCore)
+  a plain Camera2 preview of the main rear camera. It is closed right before a recorder opens the
+  camera and restarted after the recording stops; it also stops when the screen is left.
+* **Settings sheet.** Mode, Capture (audio, full-res stills), Depth and poses (ARCore recording),
+  Camera (lock AE/AF/AWB, RAW DNG, OIS off, camera inventory), Location (Geospatial), Upload receiver
+  (URL, upload last session). Saved at once in SharedPreferences (`CaptureSettings.kt`).
+* **Sessions.** Large title, one inset-grouped list (name, mode · duration · size · frames). Tap to open,
+  swipe left for **Upload** / **Delete**, long-press for the same as a menu. The receiver URL is the
+  Settings one (tap "Receiver" to change it).
+* **Viewer.** Back button and inline title, segmented tabs (Video / 3D / Map / Sensors / Info),
+  transport bar (play / pause, scrubber, time, speed) at the bottom.
+* **Navigation.** Top bar (close, tracking, map, robot link, settings), instruction banner with a
+  direction arrow, speed gauge and stats, voice button, and one bottom panel: radar + minimap, distance
+  chips, Guide / Auto / Manual, joystick + move / turn steppers in Manual, and go-to · GO (Auto) · STOP ·
+  save map. Map loading / aligning, the robot link, E-stop, robot and safety parameters and guidance
+  toggles are in the settings sheet (parameters apply when it closes).
+
+`./gradlew testDebugUnitTest` also renders these screens off-device with Robolectric
+(`UiScreenshotTest`) to `app/build/screenshots/`.
+
 ### Live view while recording
 
-* **Mode A** draws what has been captured so far on top of the camera image: a 3D point cloud of the
-  ARCore depth (coloured by height above the floor), a top-down occupancy map with your path
-  (top right), and a HUD with frames, depth, points, mapped area, distance walked, speed and a
-  72-beam virtual lidar of the nearest surfaces. Long-press the map to hide or show the 3D points.
+* **Mode A** draws what has been captured so far on top of the camera image: the live TSDF mesh
+  (shaded, coloured by height above the floor, refreshed about once a second; see
+  [Depth filtering and 3D reconstruction](#depth-filtering-and-3d-reconstruction)), a top-down occupancy
+  map with your path (top right), and a HUD with frames, depth, mesh size, mapped area, distance walked,
+  speed and a 72-beam virtual lidar of the nearest surfaces. Long-press the map to cycle
+  mesh → mesh + filtered depth (turbo colours, rejected pixels transparent) → depth only → camera only.
   The map is saved with the session (`extras/map/`) and under `maps/` for navigation mode.
 * **Mode B** shows the main lens live, with a coverage panorama on top: a yaw × pitch grid filled in by
   how long the phone pointed each way (from the game rotation vector), plus live per-lens frame,
@@ -107,14 +141,14 @@ Options (checkboxes):
 
 ### Navigation mode (phone on a robot)
 
-The **Navigate** button opens a separate screen for driving a two-wheeled robot with the phone as its
+The **Nav** button opens a separate screen for driving a two-wheeled robot with the phone as its
 only sensor. It talks to the robot with the same protocol as the iPhone app
 ([`robot/PROTOCOL.md`](../robot/PROTOCOL.md)), so the same receivers work with both phones:
 `robot/receiver.py` (Python: sim, serial, Raspberry Pi GPIO), `robot/esp32_diffdrive` (ESP32 with Wi-Fi
 and BLE) and `robot/serial_motor` (Arduino bridge). See [`NAVIGATION.md`](../NAVIGATION.md).
 
 1. **Map.** Walk or drive around; ARCore depth builds a 5 cm occupancy grid and a point cloud. Or press
-   **Load map** to bring back a map saved by mode A or by an earlier navigation run, then **Align**
+   **Load map** (settings sheet) to bring back a map saved by mode A or by an earlier navigation run, then **Align**
    (scan matching of the live map against the saved one) or **Same start** (you started where the
    saved map started).
 2. **Goal.** Tap the top-down map, or tap the floor in the camera view. A* plans a path that keeps the
@@ -147,8 +181,8 @@ support it (else the built-in command matcher) and the phone's text-to-speech. A
 ### Sessions and playback viewer
 
 **Sessions** (main screen, disabled while recording) lists the recorded sessions, newest first, with
-mode, duration, size and frame count. Each one has **Open**, **Upload** (the receiver URL field is the
-same setting as on the main screen) and **Delete** (asks first). **Open** plays the session back on
+mode, duration, size and frame count. Tap one to open it; swipe left (or long-press) for **Upload** (to
+the receiver URL from Settings) and **Delete** (asks first). Opening it plays the session back on
 the phone, like the iPhone app's viewer (`ios/R2SCapture/SessionViewer.swift`):
 
 * **Video.** Mode A plays `video.mp4` with the ARCore depth map (raw or smoothed) alpha-blended on
@@ -159,9 +193,11 @@ the phone, like the iPhone app's viewer (`ios/R2SCapture/SessionViewer.swift`):
   with the RAW DNG and ToF counts and each lens's size, codec, K, exposure and ISO at the playhead.
   **Rotate** turns the sensor-oriented image upright. It defaults to the camera's sensor orientation
   and the setting is remembered.
-* **3D.** The live-map point cloud (`extras/map/points.ply`, or a `mesh.ply` when one exists)
-  coloured by height, the camera trajectory in yellow and the camera at the playhead in red. Drag to
-  orbit, pinch to zoom, use two fingers to pan, and double-tap to reset.
+* **3D.** The reconstructed mesh (`mesh.ply`, else `extras/recon/mesh.ply`, else the cleaned points
+  in `extras/map/points.ply`), lit and coloured by height (**Colours** switches to the PLY's camera
+  colours), the camera trajectory in yellow and the camera at the playhead in red. Drag to orbit, pinch
+  to zoom, use two fingers to pan, and double-tap to reset. The video tab's depth overlay shows the
+  filtered depth (raw depth with its confidence) in turbo colours with rejected pixels transparent.
 * **Map.** The top-down occupancy map (`extras/map`), with the trajectory and an arrow for the camera
   at the playhead.
 * **Sensors.** Charts of accelerometer, gyro, magnetometer, the fused IMU (user acceleration,
@@ -175,6 +211,43 @@ the phone, like the iPhone app's viewer (`ios/R2SCapture/SessionViewer.swift`):
 The transport bar (play/pause, scrubber, 0.25×–4× speed) drives all tabs. Missing files are skipped,
 and a tab with nothing to show explains why. For example, mode B has no on-device poses, so it has no
 3D or map.
+
+### Depth filtering and 3D reconstruction
+
+Depth-from-motion is ~160×120, noisy and smeared across silhouettes, so nothing uses it unfiltered.
+`DepthFusion` takes each new depth map off the GL thread (latest frame wins; recording never waits):
+
+1. **Filter** (`DepthFilter.kt`, pure Kotlin): raw depth + confidence when ARCore delivers it
+   (confidence < 0.5 dropped), else smoothed depth; range 0.2–4 m; a 3×3 median over same-surface
+   neighbours (relative difference < 12 %), pixels with < 3 such neighbours dropped as speckle;
+   **flying pixels** (a jump > 6 % towards both a nearer and a farther neighbour) dropped; surfaces seen
+   at > 80° from their normal dropped; a pixel the previous frame saw *through* (free-space violation
+   > 10 %) dropped. Settings and per-rule pixel counts go to `session.json` → `depth_processing`.
+2. **Occupancy / virtual lidar** (`MapBuilder`) from the filtered dense smoothed depth (keeps blank
+   walls that raw depth drops). Rays now only clear cells where they pass below 0.6 m, so a low box
+   seen from chest height is not erased by rays to the wall behind it.
+3. **TSDF fusion** (`TsdfVolume.kt`) at ≤ 10 Hz: 3 cm voxels in 8³ blocks (voxel hashing), truncation
+   4 voxels (12 cm), depth-dependent weights, running average capped at 64, free-space carving through
+   existing blocks, colour from the camera image (sampled at depth resolution), ≤ 8000 blocks (~45 MB).
+   ~4 ms filter + ~7 ms integration per 160×120 frame on a desktop JVM.
+4. **Mesh** by marching cubes (generated, crack-free case table; vertices shared per grid edge,
+   area-weighted normals). Live: dirty blocks re-extracted about once a second. At stop: full extraction,
+   connected components under 120 triangles dropped (noise blobs), dominant planes (floor, walls) found
+   by RANSAC and the rest split into connected **objects** (bounding boxes in `objects.json`), and a
+   cleaned point set (one mesh vertex per voxel, statistical outliers removed).
+
+Outputs (mode A): `extras/recon/mesh.ply` (binary LE, normals, camera colours or height colours),
+`extras/recon/points.ply`, `extras/recon/objects.json`, `extras/recon/recon.json`; `extras/map/points.ply`
+is now the cleaned TSDF surface points (occupancy, trajectory and `map.json` unchanged). Navigation mode
+runs the same filter + fusion for its occupancy grid and live mesh. The converter applies the same
+confidence / flying-pixel rules in numpy (`tools/depth_filter.py`); `--no-depth-filter` keeps the
+recorded depth bit-identical.
+
+Limits: tuned and tested on synthetic scenes (`DepthFusionTest`: a box on a floor before a wall with
+noise, smeared edges and speckle → every vertex within one voxel, box as its own object), not yet on
+the phone. Thin structures (< 2 voxels, chair legs, cables) disappear, surfaces beyond 4 m are not
+fused, the volume stops growing at 8000 blocks (`volume_full` in `recon.json`), and the mesh lives in
+one ARCore session's frame (no loop closure: drift shows up as doubled surfaces).
 
 ## 3. Capture tips (13 Ultra)
 
@@ -315,7 +388,8 @@ sparser than LiDAR), real MediaCodec output, and device timing.
   the Depth API but not as a ToF-using device). Expect roughly 160×120 depth (the actual size is
   recorded in `session.json`), lower accuracy past ~4 m, holes on textureless surfaces, and nothing
   while standing still. Raw confidence is real but means something different from ARKit's LiDAR
-  confidence. The converter's fused mesh is correspondingly coarser than an iPhone Pro scene mesh.
+  confidence. The on-phone TSDF mesh and the converter's fused mesh are correspondingly coarser than an
+  iPhone Pro scene mesh.
 * **The ToF module** is listed by GSMArena but is probably used only for autofocus. If "Dump cams"
   shows a camera with `depth16=true`, mode B records it. It is not registered to the RGB stream, so it
   stays in extras (it can supply metric scale for SfM after calibration).

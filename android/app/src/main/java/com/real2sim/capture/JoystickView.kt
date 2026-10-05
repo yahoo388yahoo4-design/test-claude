@@ -14,15 +14,15 @@ import kotlin.math.min
 class JoystickView(ctx: Context) : View(ctx) {
     var onChange: ((Float, Float) -> Unit)? = null
     private var kx = 0f; private var ky = 0f
-    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.argb(200, 255, 255, 255) }
-    private val base = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(90, 0, 0, 0) }
-    private val knob = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 60, 160, 255) }
+    // iOS Joystick look: translucent white pad, thin ring, cyan knob
+    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = resources.displayMetrics.density; color = Color.argb(100, 255, 255, 255) }
+    private val base = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(30, 255, 255, 255) }
+    private val knob = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(100, 210, 255) }
 
     override fun onDraw(c: Canvas) {
         val r = min(width, height) / 2f - 4f; val cx = width / 2f; val cy = height / 2f
         c.drawCircle(cx, cy, r, base); c.drawCircle(cx, cy, r, ring)
-        c.drawLine(cx - r, cy, cx + r, cy, ring); c.drawLine(cx, cy - r, cx, cy + r, ring)
-        c.drawCircle(cx + kx * r, cy + ky * r, r * 0.3f, knob)
+        c.drawCircle(cx + kx * r, cy + ky * r, minOf(r * 0.35f, 19 * resources.displayMetrics.density), knob)
     }
 
     @SuppressLint("ClickableViewAccessibility")

@@ -435,6 +435,12 @@ class SceneView(ctx: Context) : GLSurfaceView(ctx), GLSurfaceView.Renderer {
 
     fun setMarker(p: FloatArray?) { marker = p; requestRender() }
 
+    /** Height colours (default) <-> the PLY's own colours (camera RGB of the TSDF mesh), when it has any. */
+    @Volatile var fileColors = false
+        private set
+
+    fun toggleColors() { fileColors = !fileColors; lastScene?.let { pending = it }; requestRender() }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         program = link(
             """
@@ -442,7 +448,9 @@ class SceneView(ctx: Context) : GLSurfaceView(ctx), GLSurfaceView.Renderer {
             uniform float u_Lit; varying vec3 v_Col;
             void main() {
               gl_Position = u_Mvp * vec4(a_Pos, 1.0); gl_PointSize = u_Size;
-              float l = mix(1.0, 0.35 + 0.65 * abs(dot(normalize(a_Nrm + vec3(1e-6)), normalize(vec3(0.3, 1.0, 0.5)))), u_Lit);
+              vec3 n = normalize(a_Nrm + vec3(1e-6));
+              float key = abs(dot(n, normalize(vec3(0.3, 1.0, 0.5)))); float fill = abs(dot(n, normalize(vec3(-0.6, 0.2, -0.7))));
+              float l = mix(1.0, 0.28 + 0.58 * key + 0.22 * fill, u_Lit);
               v_Col = a_Col * l;
             }
             """.trimIndent(),
@@ -493,7 +501,7 @@ class SceneView(ctx: Context) : GLSurfaceView(ctx), GLSurfaceView.Renderer {
             val a = FloatArray(nv * 9)
             for (i in 0 until nv) {
                 a[i * 9] = s.points[i * 3]; a[i * 9 + 1] = s.points[i * 3 + 1]; a[i * 9 + 2] = s.points[i * 3 + 2]
-                val rgb = s.pointRgb
+                val rgb = s.pointRgb?.takeIf { fileColors }
                 if (rgb != null) { a[i * 9 + 3] = (rgb[i] shr 16 and 255) / 255f; a[i * 9 + 4] = (rgb[i] shr 8 and 255) / 255f; a[i * 9 + 5] = (rgb[i] and 255) / 255f }
                 else heightColor(s.points[i * 3 + 1], a, i * 9 + 3)
             }
@@ -521,9 +529,9 @@ class SceneView(ctx: Context) : GLSurfaceView(ctx), GLSurfaceView.Renderer {
             for (q in 0 until nT) for (c in 0 until 3) {
                 val vi = s.tris[(q * stepT) * 3 + c]
                 a[o] = s.points[vi * 3]; a[o + 1] = s.points[vi * 3 + 1]; a[o + 2] = s.points[vi * 3 + 2]
-                val rgb = s.pointRgb
+                val rgb = s.pointRgb?.takeIf { fileColors }
                 if (rgb != null) { a[o + 3] = (rgb[vi] shr 16 and 255) / 255f; a[o + 4] = (rgb[vi] shr 8 and 255) / 255f; a[o + 5] = (rgb[vi] and 255) / 255f }
-                else { a[o + 3] = 0.75f; a[o + 4] = 0.75f; a[o + 5] = 0.78f }
+                else heightColor(s.points[vi * 3 + 1], a, o + 3)
                 a[o + 6] = nrm[vi * 3]; a[o + 7] = nrm[vi * 3 + 1]; a[o + 8] = nrm[vi * 3 + 2]
                 o += 9
             }

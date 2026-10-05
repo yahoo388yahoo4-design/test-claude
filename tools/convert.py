@@ -40,6 +40,8 @@ def main(argv=None):
     ap.add_argument("--lr-fps", type=float, default=10.0, help="LiteReality frame rate")
     ap.add_argument("--smoothed-depth", action="store_true", help="use ARKit smoothedSceneDepth if recorded")
     ap.add_argument("--no-extras", action="store_true")
+    ap.add_argument("--no-depth-filter", action="store_true",
+                    help="Android: keep depth as recorded (default: confidence + flying-pixel filter, tools/depth_filter.py)")
     ap.add_argument("--fold", default="Training")
     ap.add_argument("--max-frames", type=int, default=0, help="debug: only the first N frames")
     args = ap.parse_args(argv)
@@ -48,6 +50,8 @@ def main(argv=None):
     ep = open_episode(args.session, args.fmt)
     if args.smoothed_depth and hasattr(ep, "use_smoothed"):
         ep.use_smoothed = True
+    if args.no_depth_filter and hasattr(ep, "filter_depth"):
+        ep.filter_depth = False
     if args.max_frames:
         ep.frames = ep.frames[:args.max_frames]
     if not ep.frames:

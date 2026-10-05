@@ -1,16 +1,15 @@
 package com.real2sim.capture
 
 import android.annotation.SuppressLint
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.graphics.Typeface
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
-import android.widget.Button
+import android.view.View
+import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -21,42 +20,49 @@ import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Recorded sessions, newest first (name, mode, duration, size, frame count), the Android counterpart of
- * the iOS SessionsView. Per session: Open (SessionViewerActivity), Upload (Uploader -> tools/receiver.py,
- * same receiver URL as the main screen) and Delete (after a confirmation).
+ * Recorded sessions, newest first, laid out like the iOS SessionsView: large title + Done, an
+ * inset-grouped list (name, then mode · duration · size · frames), swipe left for Upload / Delete,
+ * long-press for the same actions as a menu, tap to open the viewer (SessionViewerActivity). Upload
+ * goes to the receiver URL from the main Settings sheet (tools/receiver.py).
  */
 @SuppressLint("SetTextI18n")
 class SessionsActivity : AppCompatActivity() {
     private val exec = Executors.newSingleThreadExecutor()
     private lateinit var list: LinearLayout
     private lateinit var status: TextView
-    private lateinit var url: EditText
+    private lateinit var receiver: TextView
     @Volatile private var uploading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.edgeToEdge(this)
         super.onCreate(savedInstanceState)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK); setPadding(dp(8), dp(8), dp(8), dp(8)) }
-        root.addView(TextView(this).apply { text = "Sessions"; setTextColor(Color.WHITE); textSize = 20f })
-        root.addView(TextView(this).apply {
-            text = SessionWriter.sessionsRoot(this@SessionsActivity).absolutePath
-            setTextColor(Color.GRAY); textSize = 11f; typeface = Typeface.MONOSPACE
-        })
-        url = EditText(this).apply {
-            hint = "upload receiver, e.g. http://192.168.1.10:8765#token"
-            inputType = InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_CLASS_TEXT
-            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); textSize = 13f
-            setText(prefs().getString("upload_url", ""))
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
+        root.addView(Ui.navBar(this, "", null, Ui.barButton(this, "Done", bold = true) { finish() }))
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), 0, dp(16), dp(24)) }
+        col.addView(Ui.label(this, "Sessions", 34f, Color.WHITE, Ui.BOLD).apply { setPadding(dp(4), dp(2), 0, dp(10)) })
+        receiver = Ui.label(this, "", 13f, Ui.BLUE).apply {
+            setPadding(dp(4), 0, dp(4), dp(6))
+            setOnClickListener { editReceiver() }
         }
-        root.addView(url)
-        status = TextView(this).apply { setTextColor(Color.rgb(0, 230, 118)); textSize = 11f; typeface = Typeface.MONOSPACE }
-        root.addView(status)
-        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        col.addView(receiver)
+        status = Ui.label(this, "", 12f, Ui.SECONDARY, digits = true).apply { setPadding(dp(4), 0, dp(4), dp(6)); visibility = View.GONE }
+        col.addView(status)
+        list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.rounded(Ui.BG_SHEET, Ui.dp(this@SessionsActivity, 10f))
+            clipToOutline = true
+        }
+        col.addView(list, LinearLayout.LayoutParams(-1, -2))
+        col.addView(Ui.label(this, "Swipe a session left to upload or delete it, or long-press it.\n" +
+            SessionWriter.sessionsRoot(this).absolutePath, 12f, Ui.SECONDARY).apply { setPadding(dp(16), dp(8), dp(16), 0) })
+        root.addView(ScrollView(this).apply { addView(col) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        Ui.applyInsets(root, top = true, bottom = true)
         setContentView(root)
     }
 
     override fun onResume() {
         super.onResume()
+        showReceiver()
         refresh()
     }
 
@@ -69,7 +75,25 @@ class SessionsActivity : AppCompatActivity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun setStatus(s: String) = runOnUiThread { status.text = s }
+    private fun setStatus(s: String) = runOnUiThread { status.text = s; status.visibility = if (s.isEmpty()) View.GONE else View.VISIBLE }
+
+    private fun showReceiver() {
+        val u = prefs().getString("upload_url", "").orEmpty()
+        receiver.text = if (u.isBlank()) "Set upload receiver…" else "Receiver: ${u.substringBefore('#')}"
+    }
+
+    private fun editReceiver() {
+        val e = EditText(this).apply {
+            hint = "http://192.168.1.20:8765#token"
+            inputType = InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_CLASS_TEXT
+            setSingleLine(); setText(prefs().getString("upload_url", ""))
+        }
+        val box = FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(e) }
+        Ui.alert(this).setTitle("Upload receiver").setMessage("tools/receiver.py on your computer").setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save") { _, _ -> prefs().edit { putString("upload_url", e.text.toString().trim()) }; showReceiver() }
+            .show()
+    }
 
     private fun refresh() {
         val root = SessionWriter.sessionsRoot(this)
@@ -82,33 +106,59 @@ class SessionsActivity : AppCompatActivity() {
     private fun show(sessions: List<SessionSummary>) {
         list.removeAllViews()
         if (sessions.isEmpty()) {
-            list.addView(TextView(this).apply { text = "No sessions yet."; setTextColor(Color.LTGRAY); setPadding(0, dp(16), 0, 0) })
+            list.addView(Ui.label(this, "No sessions yet. Record one on the main screen.", 15f, Ui.SECONDARY).apply {
+                gravity = Gravity.CENTER; setPadding(dp(16), dp(28), dp(16), dp(28))
+            })
             return
         }
-        for (s in sessions) list.addView(row(s))
+        sessions.forEachIndexed { i, s ->
+            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Ui.SEPARATOR) },
+                LinearLayout.LayoutParams(-1, maxOf(1, dp(1) / 2)).apply { marginStart = dp(60) })
+            list.addView(row(s))
+        }
     }
 
-    private fun row(s: SessionSummary): LinearLayout {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(28, 30, 34))
-            setPadding(dp(10), dp(8), dp(10), dp(4))
+    private fun modeBadge(mode: String): Pair<String, Int> = when (mode) {
+        "arcore_rgbd" -> "A" to Ui.BLUE
+        "multicam" -> "B" to Ui.PURPLE
+        "sensors" -> "C" to Ui.GRAY
+        else -> "?" to Ui.GRAY
+    }
+
+    private fun row(s: SessionSummary): View {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Ui.BG_SHEET)
+            setPadding(dp(16), dp(10), dp(10), dp(10))
+            minimumHeight = dp(60)
+            isClickable = true; isLongClickable = true
+            background = Ui.pressable(android.graphics.drawable.ColorDrawable(Ui.BG_SHEET), android.graphics.drawable.ColorDrawable(Color.WHITE))
         }
-        box.addView(TextView(this).apply { text = s.name; setTextColor(Color.WHITE); textSize = 14f; typeface = Typeface.MONOSPACE })
-        val parts = mutableListOf(s.modeLabel, fmtDuration(s.durationS), fmtBytes(s.bytes))
+        val (letter, color) = modeBadge(s.mode)
+        content.addView(Ui.label(this, letter, 15f, Color.WHITE, Ui.BOLD).apply {
+            gravity = Gravity.CENTER; background = Ui.rounded(color, Ui.dp(this@SessionsActivity, 7f))
+        }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(14) })
+        val text = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        text.addView(Ui.label(this, s.name, 15f, Color.WHITE, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
+        val parts = mutableListOf(modeLabel(s.mode), fmtDuration(s.durationS), fmtBytes(s.bytes))
         s.frames?.let { parts.add("$it frames") }
-        if (!s.complete) parts.add("incomplete")
-        box.addView(TextView(this).apply { text = parts.joinToString(" · "); setTextColor(Color.LTGRAY); textSize = 12f })
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
-        fun btn(label: String, onClick: () -> Unit) = Button(this).apply { text = label; isAllCaps = false; setOnClickListener { onClick() } }
-        buttons.addView(btn("Open") { open(s) })
-        buttons.addView(btn("Upload") { upload(s) })
-        buttons.addView(btn("Delete") { confirmDelete(s) })
-        box.addView(buttons)
-        box.setOnClickListener { open(s) }
-        return box.also {
-            it.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, dp(4), 0, dp(4)) }
-        }
+        text.addView(Ui.label(this, parts.joinToString(" · "), 13f, Ui.SECONDARY, digits = true).apply { setPadding(0, dp(3), 0, 0) })
+        if (!s.complete) text.addView(Ui.label(this, "incomplete (no session.json)", 12f, Ui.ORANGE).apply { setPadding(0, dp(2), 0, 0) })
+        content.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+        content.addView(Ui.icon(this, R.drawable.ic_chevron_right, Ui.TERTIARY, 16))
+        content.setOnClickListener { open(s) }
+        content.setOnLongClickListener { menu(s); true }
+        return SwipeRow(this, content, listOf(
+            Triple("Upload", Ui.BLUE) { upload(s) },
+            Triple("Delete", Ui.RED) { confirmDelete(s) },
+        ))
+    }
+
+    /** Long-press menu (iOS context menu). */
+    private fun menu(s: SessionSummary) {
+        Ui.alert(this).setTitle(s.name).setItems(arrayOf("Open", "Upload to receiver", "Delete")) { _, i ->
+            when (i) { 0 -> open(s); 1 -> upload(s); else -> confirmDelete(s) }
+        }.show()
     }
 
     private fun open(s: SessionSummary) {
@@ -116,10 +166,9 @@ class SessionsActivity : AppCompatActivity() {
     }
 
     private fun upload(s: SessionSummary) {
-        val base = url.text.toString().trim()
-        if (base.isEmpty()) { setStatus("enter the receiver URL (tools/receiver.py) first"); return }
+        val base = prefs().getString("upload_url", "").orEmpty().trim()
+        if (base.isEmpty()) { setStatus("set the receiver URL (tools/receiver.py) first"); editReceiver(); return }
         if (uploading) { setStatus("an upload is already running"); return }
-        prefs().edit { putString("upload_url", base) }
         uploading = true
         Thread({
             try { Uploader.upload(s.dir, base) { setStatus("${s.name}: $it") } } catch (e: Exception) { setStatus("upload failed: $e") }
@@ -128,7 +177,7 @@ class SessionsActivity : AppCompatActivity() {
     }
 
     private fun confirmDelete(s: SessionSummary) {
-        AlertDialog.Builder(this)
+        Ui.alert(this)
             .setTitle("Delete session?")
             .setMessage("${s.name}\n${s.modeLabel} · ${fmtBytes(s.bytes)}\n\nThis removes the folder from the phone and cannot be undone.")
             .setNegativeButton("Cancel", null)

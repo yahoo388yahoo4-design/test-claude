@@ -47,6 +47,8 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
     @Volatile var floorBand = 0.06f
     @Volatile var maxObstacleHeight = 1.8f
     @Volatile var maxRange = 4.0f
+    /** Rays mark cells free only where they pass below this height above the floor (see [carve]). */
+    @Volatile var carveMaxHeight = 0.6f
 
     val occ = ByteArray(size * size)          // log-odds, -LMAX..LMAX, 0 unknown
     private val seen = BooleanArray(size * size)
@@ -107,14 +109,24 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
     }
 
     /**
-     * Integrate one DEPTH16 map (mm, 0 = no data). [m] is the camera pose (column-major 4x4, ARCore
-     * OpenGL camera: +x right, +y up, -z forward relative to the image). Intrinsics are at depth
-     * resolution. [heading] is the robot heading (rad, atan2(z, x) of the forward direction) used to
-     * fill [depthScan]. Returns the number of points used.
+     * Integrate one DEPTH16 map (mm, 0 = no data), unfiltered. Prefer [integrateMeters] with a map cleaned by
+     * [DepthFilter] (DepthFusion does that); kept for callers that have nothing else.
      */
     fun integrateDepth(buf: ByteBuffer, w: Int, h: Int, rowStride: Int, fx: Float, fy: Float, cx: Float, cy: Float,
-                       m: FloatArray, heading: Float, tNs: Long, step: Int = 2): Int = synchronized(this) {
+                       m: FloatArray, heading: Float, tNs: Long, step: Int = 2): Int {
         val b = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        val d = FloatArray(w * h) { i -> (b.getShort((i / w) * rowStride + (i % w) * 2).toInt() and 0xffff) / 1000f }
+        return integrateMeters(d, w, h, fx, fy, cx, cy, m, heading, tNs, step)
+    }
+
+    /**
+     * Integrate one depth map in metres (0 = invalid, rows top-down, normally filtered by [DepthFilter]).
+     * [m] is the camera pose (column-major 4x4, ARCore OpenGL camera: +x right, +y up, -z forward relative
+     * to the image). Intrinsics are at depth resolution. [heading] is the robot heading (rad, atan2(z, x) of
+     * the forward direction) used to fill [depthScan]. Returns the number of points used.
+     */
+    fun integrateMeters(depth: FloatArray, w: Int, h: Int, fx: Float, fy: Float, cx: Float, cy: Float,
+                        m: FloatArray, heading: Float, tNs: Long, step: Int = 2): Int = synchronized(this) {
         val camX = m[12]; val camY = m[13]; val camZ = m[14]
         if (!initialized) reset(camX, camZ)
         val floor = if (floorY.isNaN()) camY - 1.4f else floorY
@@ -126,9 +138,8 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
         while (v < h) {
             var u = 0
             while (u < w) {
-                val raw = b.getShort(v * rowStride + u * 2).toInt() and 0xffff
-                val d = raw / 1000f
-                if (raw > 0 && d < maxRange) {
+                val d = depth[v * w + u]
+                if (d > 0f && d < maxRange) {
                     val xc = (u - cx) / fx * d
                     val yc = -(v - cy) / fy * d
                     val zc = -d
@@ -141,7 +152,7 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
                         bump(pi, pj, -2)
                     } else if (hgt < maxObstacleHeight) {
                         bump(pi, pj, 4)
-                        if ((ray++ and 3) == 0) carve(ci, cj, pi, pj)
+                        if ((ray++ and 3) == 0) carve(ci, cj, pi, pj, camY - floor, hgt)
                         val dx = wx - camX; val dz = wz - camZ
                         val r = hypot(dx, dz)
                         var a = atan2(dz, dx) - heading
@@ -170,15 +181,21 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
 
     fun binBearing(bin: Int): Float = Math.toRadians((if (bin > bins / 2) bin - bins else bin) * 360.0 / bins).toFloat()
 
-    private fun carve(i0: Int, j0: Int, i1: Int, j1: Int) {
-        // Bresenham from the camera cell to (excluding) the hit cell.
+    /**
+     * Free space along the ray from the camera cell to (excluding) the hit cell (Bresenham), only where the
+     * ray passes lower than [carveMaxHeight] above the floor: a ray passing high over a low obstacle (a box
+     * seen from 1.4 m) does not prove the cells under it free.
+     */
+    private fun carve(i0: Int, j0: Int, i1: Int, j1: Int, h0: Float, h1: Float) {
         var x = i0; var y = j0
         val dx = abs(i1 - i0); val dy = -abs(j1 - j0)
         val sx = if (i0 < i1) 1 else -1; val sy = if (j0 < j1) 1 else -1
         var err = dx + dy
         var n = 0
+        val len = max(1, max(dx, -dy))
         while (!(x == i1 && y == j1) && n++ < 200) {
-            bump(x, y, -1)
+            val f = min(1f, max(abs(x - i0), abs(y - j0)).toFloat() / len)
+            if (h0 + (h1 - h0) * f < carveMaxHeight) bump(x, y, -1)
             val e2 = 2 * err
             if (e2 >= dy) { err += dy; x += sx }
             if (e2 <= dx) { err += dx; y += sy }
@@ -254,7 +271,11 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
     fun occCopy(): ByteArray = synchronized(this) { occ.copyOf() }
 
     // ------------------------------------------------------------------ save / load / merge
-    fun save(dir: File, extra: JSONObject = JSONObject()) = synchronized(this) {
+    /**
+     * Writes occupancy.bin / map.json / occupancy.png / trajectory.csv / points.ply. [cleanPoints] (xyz, e.g.
+     * DepthFusion's TSDF surface points) replaces the live point set in points.ply when given.
+     */
+    fun save(dir: File, extra: JSONObject = JSONObject(), cleanPoints: FloatArray? = null) = synchronized(this) {
         dir.mkdirs()
         DeflaterOutputStream(FileOutputStream(File(dir, "occupancy.bin")), Deflater(6, true)).use { it.write(occ) }
         val meta = JSONObject(extra.toString()).apply {
@@ -264,7 +285,8 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
             put("encoding", "occupancy.bin = raw-deflate int8 log-odds, row-major [z][x], >$OCC_T occupied, <$FREE_T free")
             put("frame", "ARCore world of the recording session (y up); cell (i,j) covers x = origin_x + i*res, z = origin_z + j*res")
             put("known_area_m2", knownAreaM2().toDouble()); put("travelled_m", travelled.toDouble())
-            put("points", pointCount)
+            put("points", cleanPoints?.let { it.size / 3 } ?: pointCount)
+            put("points_source", if (cleanPoints != null) "TSDF surface (DepthFusion), outliers removed" else "voxel-downsampled filtered depth")
         }
         File(dir, "map.json").writeText(meta.toString(1))
         bitmap()?.first?.let { b -> FileOutputStream(File(dir, "occupancy.png")).use { b.compress(Bitmap.CompressFormat.PNG, 100, it) } }
@@ -272,10 +294,12 @@ class MapBuilder(val res: Float = 0.05f, val size: Int = 800) {
         File(dir, "trajectory.csv").bufferedWriter().use { w ->
             w.write("t,x,y,z\n"); traj.forEach { p -> w.write("${p[3]},${p[0]},${p[1]},${p[2]}\n") }
         }
+        val src = cleanPoints ?: points
+        val n = cleanPoints?.let { it.size / 3 } ?: pointCount
         FileOutputStream(File(dir, "points.ply")).use { o ->
-            o.write("ply\nformat binary_little_endian 1.0\nelement vertex $pointCount\nproperty float x\nproperty float y\nproperty float z\nend_header\n".toByteArray())
-            val bb = ByteBuffer.allocate(pointCount * 12).order(ByteOrder.LITTLE_ENDIAN)
-            for (k in 0 until pointCount * 3) bb.putFloat(points[k])
+            o.write("ply\nformat binary_little_endian 1.0\nelement vertex $n\nproperty float x\nproperty float y\nproperty float z\nend_header\n".toByteArray())
+            val bb = ByteBuffer.allocate(n * 12).order(ByteOrder.LITTLE_ENDIAN)
+            for (k in 0 until n * 3) bb.putFloat(src[k])
             o.write(bb.array())
         }
     }

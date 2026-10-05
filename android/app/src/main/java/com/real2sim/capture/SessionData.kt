@@ -26,6 +26,7 @@ import kotlin.math.min
  *   accel.csv gyro.csv mag.csv imu.csv altimeter.csv location.csv status.csv clock.csv
  *   extras/sensors_raw.csv (t,sensor,v0..v5,accuracy), extras/device_status.csv, extras/gnss_status.csv
  *   extras/map/{map.json,occupancy.bin,occupancy.png,trajectory.csv,points.ply}   mode A live map
+ *   extras/recon/{mesh.ply,points.ply,objects.json,recon.json}   mode A TSDF reconstruction (DepthFusion)
  *
  * Every `t` is seconds on CLOCK_BOOTTIME.
  */
@@ -290,8 +291,11 @@ object RawSensors {
 
 // ------------------------------------------------------------------------------------------ frames / depth
 
-/** Byte range of one raw-deflate depth map in a .zlib.bin blob. */
-data class DepthRef(val t: Double, val off: Long, val len: Int, val w: Int, val h: Int)
+/**
+ * Byte range of one raw-deflate depth map in a .zlib.bin blob; [confOff]/[confLen] the matching confidence
+ * map (levels 0..2) in conf.zlib.bin next to depth.zlib.bin, or -1 / 0.
+ */
+data class DepthRef(val t: Double, val off: Long, val len: Int, val w: Int, val h: Int, val confOff: Long = -1, val confLen: Int = 0)
 
 /** One video sample (frames.jsonl or cams/<lens>.jsonl line). K = fx,fy,cx,cy; T = 4x4 row-major camera-to-world. */
 class FrameRec(
@@ -345,7 +349,10 @@ object Frames {
             if (line.isBlank()) continue
             val o = MiniJson.obj(line) ?: continue
             frame(o, k)?.let { frames.add(it) }
-            depthRef(o, "d", depthSizeKeys.first, depthSizeKeys.second)?.let { depth.add(it) }
+            depthRef(o, "d", depthSizeKeys.first, depthSizeKeys.second)?.let { r ->
+                val c = if (depthSizeKeys.first == "dw") o.doubles("c") else null   // mode A: raw confidence range
+                depth.add(if (c != null && c.size == 2) r.copy(confOff = c[0].toLong(), confLen = c[1].toInt()) else r)
+            }
             depthRef(o, "sd", depthSizeKeys.first, depthSizeKeys.second)?.let { smooth.add(it) }
             k++
         }
@@ -441,15 +448,26 @@ object Depth {
         return out
     }
 
-    /** Same palette as the iOS viewer: near red -> yellow -> green -> cyan -> blue far; 0 mm transparent. */
+    /** Turbo palette (DepthViz): near red -> yellow -> green -> cyan -> blue far; 0 mm transparent. */
     fun colorize(mm: ShortArray, maxM: Float = 5f): IntArray = IntArray(mm.size) { i ->
         val v = mm[i].toInt() and 0xffff
-        if (v == 0) 0 else {
-            val t = min(v / 1000f / maxM, 1f)
-            fun ch(k: Int) = (255 * min(max(1.5f - abs(4 * t - k), 0f), 1f)).toInt()
-            (0xff shl 24) or (ch(1) shl 16) or (ch(2) shl 8) or ch(3)
-        }
+        if (v == 0) 0 else DepthViz.color(v / 1000f, maxM)
     }
+
+    /** Confidence levels (0..2) of a raw depth map: conf.zlib.bin next to [depthBlob], or null. */
+    fun loadConf(depthBlob: File, ref: DepthRef): ByteArray? {
+        if (ref.confOff < 0 || ref.confLen <= 0 || depthBlob.name != "depth.zlib.bin") return null
+        val f = File(depthBlob.parentFile, "conf.zlib.bin")
+        val packed = readRange(f, ref.confOff, ref.confLen) ?: return null
+        return inflateRaw(packed, ref.w * ref.h)
+    }
+
+    /**
+     * Viewer overlay: depth through the confidence + edge-aware filter (raw depth with its confidence when
+     * recorded), turbo colours, filtered-out pixels transparent.
+     */
+    fun colorizeFiltered(blob: File, ref: DepthRef, mm: ShortArray, maxM: Float = 5f): IntArray =
+        DepthViz.filteredArgb(mm, ref.w, ref.h, loadConf(blob, ref), confLevels = true, maxM = maxM)
 
     /** Median of the non-zero values (mm), or 0. */
     fun medianMm(mm: ShortArray): Int {

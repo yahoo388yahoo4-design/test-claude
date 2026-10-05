@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">Real2Sim Capture</string>
+    <string name="idle_hint">The camera starts when you press Record</string>
+    <string name="sessions">Sessions</string>
+    <string name="settings">Settings</string>
+    <string name="navigate">Navigation mode</string>
+    <string name="nav">Nav</string>
 </resources>

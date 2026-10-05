@@ -1,0 +1,5 @@
+<resources>
+    <color name="ios_blue">#FF0A84FF</color>
+    <color name="ios_label">#FFFFFFFF</color>
+    <color name="ios_secondary">#99EBEBF5</color>
+</resources>
