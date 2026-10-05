@@ -86,6 +86,23 @@ class UiScreenshotTest {
     }
 
     @Test
+    fun idlePreviewWithPermission() {
+        val app = org.robolectric.RuntimeEnvironment.getApplication()
+        org.robolectric.Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.CAMERA)
+        // mode B: Camera2 preview (ARCore's availability check needs Play Services, absent on the JVM)
+        CaptureSettings(app).mode = CaptureMode.MULTICAM
+        val a = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        settle()
+        // the Camera2 preview view is shown, and the "camera starts" hint goes away
+        assertTrue(a.findViewById<android.widget.FrameLayout>(R.id.previewHost).childCount > 0)
+        assertTrue(a.findViewById<View>(R.id.idleHint).visibility == View.GONE)
+        // leaving the screen releases the camera
+        Robolectric.buildActivity(MainActivity::class.java).setup().pause().get().let {
+            assertTrue(it.findViewById<android.widget.FrameLayout>(R.id.previewHost).childCount == 0)
+        }
+    }
+
+    @Test
     fun sessionsScreen() {
         val app = org.robolectric.RuntimeEnvironment.getApplication()
         val root = SessionWriter.sessionsRoot(app)

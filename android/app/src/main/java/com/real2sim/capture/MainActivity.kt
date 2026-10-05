@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
     private var mapView: MapView? = null
     private var coverage: CoverageView? = null
     private var recStartMs = 0L
+    private lateinit var idle: IdlePreview
     private val ui = android.os.Handler(android.os.Looper.getMainLooper())
     private val bgExec = java.util.concurrent.Executors.newSingleThreadExecutor()
     @Volatile private var liveBusy = false
@@ -60,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         bottomBar = findViewById(R.id.bottomBar)
         Ui.applyInsets(topBar, top = true, bottom = false)
         Ui.applyInsets(bottomBar, top = false, bottom = true)
+        idle = IdlePreview(this, previewHost) { status(it) }
         modeControl.setItems(CaptureMode.values().map { it.shortTitle }, settings.mode.ordinal)
         modeControl.onSelect = { i -> settings.mode = CaptureMode.values()[i]; modeChanged() }
         modeChanged()
@@ -87,7 +89,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Live camera while idle (like iOS); the recorders get the camera only after it is released. */
+    private fun startPreview() {
+        if (writer != null || isFinishing) return
+        idle.start(settings.mode)
+        findViewById<View>(R.id.idleHint).visibility = if (idle.running) View.GONE else View.VISIBLE
+    }
+
+    private fun stopPreview() {
+        if (::idle.isInitialized) idle.stop()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (writer == null && !notResumed()) startPreview()
+    }
+
+    private fun notResumed() = !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+
     private fun modeChanged() {
+        if (::idle.isInitialized && idle.running && writer == null) startPreview()
         modeTitle.text = settings.mode.title
         findViewById<TextView>(R.id.idleText).text = if (settings.mode == CaptureMode.SENSORS)
             "Sensors only: IMU, GNSS, barometer, … (no camera)" else getString(R.string.idle_hint)
@@ -153,10 +174,12 @@ class MainActivity : AppCompatActivity() {
         try {
             if (ArCoreApk.getInstance().requestInstall(this, !arInstallRequested) == ArCoreApk.InstallStatus.INSTALL_REQUESTED) arInstallRequested = true
         } catch (e: Exception) { status("ARCore unavailable: ${e.javaClass.simpleName} (mode B still works)") }
+        if (writer == null) startPreview()
     }
 
     override fun onPause() {
         if (writer != null) stopRecording()
+        stopPreview()
         super.onPause()
     }
 
@@ -177,6 +200,7 @@ class MainActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPerms(); return }
         val s = settings
         val m = s.mode
+        stopPreview()      // the recorder needs the camera (ARCore session / CameraDevice) to itself
         val w = SessionWriter(this, m.id)
         writer = w
         sensors = SensorRecorder(this, w).also { it.start(recordAudio = s.recordAudio) }
@@ -237,6 +261,7 @@ class MainActivity : AppCompatActivity() {
     private fun abort() {
         sensors?.stop(); sensors = null
         writer?.finish { put("aborted", true) }; writer = null
+        if (!notResumed()) startPreview()
     }
 
     private fun stopRecording() {
@@ -256,6 +281,7 @@ class MainActivity : AppCompatActivity() {
         wake?.let { if (it.isHeld) it.release() }; wake = null
         btnRecord.isEnabled = true
         setRecordingUi(false)
+        if (!notResumed()) startPreview()
         status("Saved ${w.dir.name}\n$sum")
     }
 

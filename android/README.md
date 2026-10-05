@@ -95,7 +95,10 @@ gauge, distance chips).
 * **Main screen.** Status card on top (with live stats while recording) and a red timer capsule while
   recording; at the bottom the segmented mode picker (RGB-D / Multi-cam / Sensors), the mode's full title,
   and **Sessions** · **Record** (white ring, red disc that turns into a rounded square while recording) ·
-  **Settings** · **Nav**. The camera opens when recording starts (as before), so the idle screen is black.
+  **Settings** · **Nav**. While idle the camera is live, as on iOS (`IdlePreview.kt`, nothing is
+  written): mode A runs a preview-only ARCore session, modes B and sensors (and phones without ARCore)
+  a plain Camera2 preview of the main rear camera. It is closed right before a recorder opens the
+  camera and restarted after the recording stops; it also stops when the screen is left.
 * **Settings sheet.** Mode, Capture (audio, full-res stills), Depth and poses (ARCore recording),
   Camera (lock AE/AF/AWB, RAW DNG, OIS off, camera inventory), Location (Geospatial), Upload receiver
   (URL, upload last session). Saved at once in SharedPreferences (`CaptureSettings.kt`).
