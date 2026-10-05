@@ -52,12 +52,16 @@ Example: `{"seq":42,"type":"vel","v":0.25,"w":-0.1}`
 3. Treat `stop` as highest priority and never queue it behind other work.
 4. The phone's obstacle avoidance only sees what the LiDAR sees (about 5 m, its field of view, nothing
    below 4 cm or behind the robot). Add a bumper or cliff sensor and send `estop` if the robot can hurt
-   itself or someone.
+   itself or someone. An `estop` may carry an optional `"reason"` string (the Neato and OpenBot
+   backends send `"bumper"`); phones ignore fields they do not know.
 
 ## Reference implementations
 
-* `robot/receiver.py`: Python asyncio WebSocket server with `sim`, `serial` and Raspberry Pi `gpio`
-  backends. `robot/test_receiver.py` tests it end to end.
+* `robot/receiver.py`: Python asyncio WebSocket server with `sim`, `serial`, Raspberry Pi `gpio`,
+  `neato` and `openbot` backends. `robot/test_receiver.py` and `robot/test_usb_robots.py` test it end to
+  end.
+* Android app, USB-OTG: the phone itself runs this protocol's robot side for a Neato or OpenBot plugged
+  into it (`android/.../robot/UsbRobot.kt`), so nothing else is needed on the robot.
 * `robot/esp32_diffdrive/esp32_diffdrive.ino`: ESP32 with Wi-Fi WebSocket and BLE UART, TB6612 / L298N /
   DRV8833 drivers.
 * `robot/serial_motor/serial_motor.ino`: Arduino motor bridge for `receiver.py --backend serial`.

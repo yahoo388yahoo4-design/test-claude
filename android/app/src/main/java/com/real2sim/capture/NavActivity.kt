@@ -24,6 +24,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.real2sim.capture.robot.UsbRobot
+import com.real2sim.capture.robot.UsbRobotKind
+import com.real2sim.capture.voice.NavActions
+import com.real2sim.capture.voice.VoiceAssistant
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
@@ -158,6 +162,9 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         mapView.onTap = { x, z -> setGoal(x, z, "map") }
         root.addView(controls(), FrameLayout.LayoutParams(-1, -2).apply { gravity = Gravity.BOTTOM; bottomMargin = 0 })
         joyView?.let { root.addView(it, FrameLayout.LayoutParams(dp(170), dp(170)).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL; leftMargin = dp(10) }) }
+        voice = VoiceAssistant(this, voiceActions) { status(it) }.also { v ->
+            root.addView(v.micButton(), FrameLayout.LayoutParams(dp(64), dp(64)).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; rightMargin = dp(10) })
+        }
         setContentView(root)
         gl.setOnTouchListener { v, e ->
             if (e.action == MotionEvent.ACTION_UP) { taps.add(floatArrayOf(e.x, e.y)); v.performClick() }
@@ -188,7 +195,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         stopDist = pf("stop", stopDist); slowDist = pf("slow", slowDist); goalTol = pf("goalTol", goalTol)
         closedLoopMoves = prefs.getBoolean("closedLoop", true); haptics = prefs.getBoolean("haptics", true)
 
-        val kinds = arrayOf("None (guide only)", "Wi-Fi (WebSocket)", "Bluetooth LE (UART)")
+        val kinds = arrayOf("None (guide only)", "Wi-Fi (WebSocket)", "Bluetooth LE (UART)", "USB: Neato", "USB: OpenBot")
         val linkKind = android.widget.Spinner(this).apply {
             adapter = android.widget.ArrayAdapter(this@NavActivity, android.R.layout.simple_spinner_dropdown_item, kinds)
             setSelection(prefs.getInt("linkKind", 1)); setBackgroundColor(Color.LTGRAY)
@@ -201,8 +208,13 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             hint = "BLE name"; setText(prefs.getString("bleName", "R2S-Robot")); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); width = dp(110)
         }
         val connect = btn("Connect") {
-            val k = RobotLink.Kind.values()[linkKind.selectedItemPosition]
             prefs.edit().putInt("linkKind", linkKind.selectedItemPosition).putString("wsUrl", url.text.toString()).putString("bleName", bleName.text.toString()).apply()
+            if (linkKind.selectedItemPosition >= 3) {   // Neato / OpenBot on the phone's USB-OTG port (robot/UsbRobot.kt)
+                val rk = if (linkKind.selectedItemPosition == 3) UsbRobotKind.NEATO else UsbRobotKind.OPENBOT
+                link.connectCustom("USB ${rk.title}") { incoming -> UsbRobot(this, rk, incoming) { status(it) }.also { it.start() } }
+                return@btn
+            }
+            val k = RobotLink.Kind.values()[linkKind.selectedItemPosition]
             if (k == RobotLink.Kind.BLE && !hasBlePermission()) { requestBlePermission(); return@btn }
             link.connect(k, url.text.toString(), bleName.text.toString())
         }
@@ -212,6 +224,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         val estopOff = btn("Release") { link.estop(false) }
 
         val modes = android.widget.RadioGroup(this).apply { orientation = LinearLayout.HORIZONTAL }
+        modeGroup = modes
         Drive.values().forEach { d ->
             modes.addView(android.widget.RadioButton(this).apply {
                 id = View.generateViewId(); text = d.name.lowercase().replaceFirstChar { it.uppercase() }; setTextColor(Color.WHITE); tag = d
@@ -292,6 +305,64 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         return wrap.also { it.layoutParams = ViewGroup.LayoutParams(-1, -2) }
     }
     private var joyView: JoystickView? = null
+    private var modeGroup: android.widget.RadioGroup? = null
+    private var voice: VoiceAssistant? = null
+
+    /** Voice control (voice/VoiceAssistant.kt) drives the same commands as the buttons. */
+    private val voiceActions = object : NavActions {
+        override fun robotConnected() = link.connected
+        override fun stopAll() = stopAll("Stopped")
+        override fun move(meters: Double, speedCms: Double) {
+            val v = minOf(speedCms.toFloat(), vMax * 100); val d = (meters * 100).toFloat()
+            val lp = lastPose
+            lp?.let { manual = floatArrayOf(it[0], it[1], it[2], d, 0f) }
+            if (!closedLoopMoves) link.move(d, v)
+            else if (lp != null) task = Task.Move(lp[0], lp[1], lp[2], d / 100, v / 100, SystemClock.elapsedRealtime())
+        }
+        override fun turn(degrees: Double, speedDps: Double) {
+            val a = degrees.toFloat(); val w = minOf(speedDps.toFloat(), Math.toDegrees(wMax.toDouble()).toFloat())
+            val lp = lastPose
+            lp?.let { manual = floatArrayOf(it[0], it[1], it[2], a, 1f) }
+            if (!closedLoopMoves) link.turn(a, w)
+            else if (lp != null) task = Task.Turn(lp[2], 0f, Math.toRadians(a.toDouble()).toFloat(), Math.toRadians(w.toDouble()).toFloat(), SystemClock.elapsedRealtime())
+        }
+        override fun pose() = lastPose?.let { doubleArrayOf(it[0].toDouble(), it[1].toDouble(), it[2].toDouble()) }
+        override fun goTo(x: Double, z: Double, label: String, drive: Boolean) {
+            setGoal(x.toFloat(), z.toFloat(), "voice: $label")
+            if (drive) setMode("auto")
+        }
+        override fun goToRelative(forward: Double, left: Double, drive: Boolean) {
+            val p = lastPose ?: return
+            val h = p[2].toDouble()   // heading grows clockwise: left of forward (cos h, sin h) is (sin h, -cos h)
+            goTo(p[0] + forward * kotlin.math.cos(h) + left * kotlin.math.sin(h), p[1] + forward * kotlin.math.sin(h) - left * kotlin.math.cos(h), "point", drive)
+        }
+        override fun setMode(mode: String) {
+            val d = Drive.values().firstOrNull { it.name.equals(mode, true) } ?: return
+            val g = modeGroup ?: return
+            (0 until g.childCount).map { g.getChildAt(it) }.firstOrNull { it.tag == d }?.let { g.check(it.id) }
+        }
+        override fun mode() = drive.name.lowercase()
+        override fun clearGoal() { goal = null; path = null; mapView.goal = null; mapView.path = null; sendStop() }
+        override fun busy() = task is Task.Move || task is Task.Turn || (drive == Drive.AUTO && goal != null && !arrivedSaid)
+        override fun statusJSON(): JSONObject {
+            val o = JSONObject().put("mode", mode()).put("robot_connected", link.connected).put("robot", link.robotName)
+            lastPose?.let { o.put("pose", JSONObject().put("x", it[0].toDouble()).put("z", it[1].toDouble()).put("heading_deg", Math.toDegrees(it[2].toDouble()))) }
+            goal?.let { g -> lastPose?.let { p -> o.put("goal_distance_m", kotlin.math.hypot((g[0] - p[0]).toDouble(), (g[1] - p[1]).toDouble())) } }
+            if (!link.batteryV.isNaN()) o.put("battery_v", link.batteryV.toDouble())
+            o.put("busy", busy())
+            return o
+        }
+        override fun spokenStatus(): String {
+            val parts = ArrayList<String>()
+            parts += if (lastPose != null) "I'm tracking" else "I'm not tracking yet"
+            parts += "${mode()} mode"
+            val g = goal; val p = lastPose
+            if (g != null && p != null) parts += "goal %.1f meters away".format(kotlin.math.hypot(g[0] - p[0], g[1] - p[1]))
+            parts += if (link.connected) "robot connected" else "robot not connected"
+            if (!link.batteryV.isNaN()) parts += "battery %.1f volts".format(link.batteryV)
+            return parts.joinToString(", ") + "."
+        }
+    }
 
     private fun stopAll(say: String) {
         task = Task.Idle
@@ -406,6 +477,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     override fun onDestroy() {
+        voice?.shutdown()
         link.disconnect()
         guide.shutdown()
         session?.close(); session = null

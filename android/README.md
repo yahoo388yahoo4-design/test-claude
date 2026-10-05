@@ -127,7 +127,8 @@ and BLE) and `robot/serial_motor` (Arduino bridge). See [`NAVIGATION.md`](../NAV
 4. **Moves and turns.** "▲ Fwd / ▼ Back X cm at V cm/s" and "⟲ Left / Right ⟳ A° at W°/s". With
    *Moves closed-loop (ARCore)* on (default) the phone measures the motion and streams velocities, so a
    robot without encoders still moves the right distance; off, `move` / `turn` go to the robot as is.
-5. **Link.** None, Wi-Fi (`ws://192.168.4.1:8777/robot` for the ESP32 access point, or the URL
+5. **Link.** None, USB: Neato, USB: OpenBot (USB-OTG cable straight into the robot; Android asks for
+   permission the first time; ported from OSSDC VisionAI Mobile), Wi-Fi (`ws://192.168.4.1:8777/robot` for the ESP32 access point, or the URL
    `receiver.py` prints) or Bluetooth LE UART (device name prefix `R2S-Robot`). **STOP** stops at once,
    **E-stop latch** / **Release** latch the robot's emergency stop, and an `estop` from the robot (bumper,
    button) cancels whatever the phone was doing. Tracking loss also stops the robot.
@@ -137,6 +138,11 @@ polar virtual lidar, the command being sent, robot link state, round-trip time, 
 speeds, map size and tracking state. Settings (saved): phone mount height and how far ahead of the
 turning centre it sits, robot radius and height, max speed and turn rate, slow / stop distances, goal
 tolerance. Each run logs `nav/<time>/nav.jsonl` (pose, command, distances at 5 Hz).
+
+**Voice.** The round mic button takes spoken commands; long-press it for voice settings. By default it
+uses the phone's own speech recogniser (on-device when the phone has one), Gemini Nano on phones that
+support it (else the built-in command matcher) and the phone's text-to-speech. A private local server
+(Whisper + Piper over Wyoming, Ollama) can replace any part. See [`VOICE.md`](../VOICE.md).
 
 ### Sessions and playback viewer
 

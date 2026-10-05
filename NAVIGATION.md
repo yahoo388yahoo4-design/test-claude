@@ -109,7 +109,15 @@ See [robot/PROTOCOL.md](robot/PROTOCOL.md). Three reference receivers:
   full power) for your base. `python3 robot/test_receiver.py` checks it end to end.
 * **ESP32** straight on the motor driver: `robot/esp32_diffdrive/esp32_diffdrive.ino` (Wi-Fi access point
   `R2S-Robot` / `r2srobot` plus BLE UART). Edit the pins and `WHEEL_BASE` / `MAX_WHEEL` at the top.
+* **Neato XV / Botvac and OpenBot**: `python3 robot/receiver.py --backend neato` or `--backend openbot`
+  on a Raspberry Pi or laptop the robot is plugged into (an iPhone has no USB serial). The Android app
+  can drive both directly over USB-OTG. See [robot/README.md](robot/README.md).
 * **ROS 2 robots**: `vel` is a `cmd_vel` Twist; bridge the WebSocket to `/cmd_vel`.
+
+## 5b. Voice control
+
+The mic button on the Nav screen takes spoken commands ("go to the table", "move forward one meter then
+turn left", "stop"). Setup, private modes and the command list: [VOICE.md](VOICE.md).
 
 ## 6. Logs and saved maps
 

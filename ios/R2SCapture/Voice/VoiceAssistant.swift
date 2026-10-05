@@ -34,6 +34,8 @@ final class VoiceAssistant: ObservableObject {
     private var agent: OpenAIChatAgent?
     private var runner: Task<Void, Never>?
     private var stoppedThisUtterance = false
+    /// Places named by voice ("remember this place as the kitchen"), in this session's AR world frame.
+    private var places: [String: P2] = [:]
 
     init() { rebuild() }
 
@@ -148,7 +150,7 @@ final class VoiceAssistant: ObservableObject {
             say("Stopped.")
             return
         }
-        let labels = engine?.roomItems.map(\.label) ?? []
+        let labels = (engine?.roomItems.map(\.label) ?? []) + places.keys.sorted()
         if settings.llm == .rules || settings.preferLocal || (settings.llm == .device && !AppleLLM.isAvailable),
            let actions = IntentParser.parse(text, labels: labels) {
             run(actions, reply: nil)
@@ -217,7 +219,6 @@ final class VoiceAssistant: ObservableObject {
     }
 
     /// Runs one action. Returns a message to say instead of the confirmation (errors, status answers).
-    @MainActor
     private func execute(_ a: VoiceAction) async -> String? {
         guard let e = engine else { return "Navigation is not running." }
         let linked = e.link.state.isConnected
@@ -234,6 +235,11 @@ final class VoiceAssistant: ObservableObject {
             if e.mode == .guide { e.mode = .manual }
             e.turn(degrees: d, speed: min(settings.turnSpeed, e.settings.maxTurnRateDeg))
         case .goTo(let target):
+            if let name = IntentParser.matchLabel(target, labels: Array(places.keys)), let p = places[name] {
+                e.setGoal(p, label: name)
+                if linked { e.mode = .auto; e.go() }
+                return linked ? nil : "Guiding you to \(name)."
+            }
             let items = e.roomItems
             guard let label = IntentParser.matchLabel(target, labels: items.map(\.label)),
                   let item = items.first(where: { $0.label == label }) else {
@@ -254,6 +260,10 @@ final class VoiceAssistant: ObservableObject {
             if let mode = NavDriveMode(rawValue: m) { e.mode = mode }
         case .clearGoal:
             e.clearGoal()
+        case .savePlace(let name):
+            guard let pose = e.hud.pose else { return "I'm not tracking yet, so I can't remember this place." }
+            places[name] = pose.p
+            return "OK, this is \(name)."
         case .status:
             return stateSummary(spoken: true)
         case .say(let s):
@@ -263,7 +273,6 @@ final class VoiceAssistant: ObservableObject {
     }
 
     /// Waits for a move / turn / go-to to finish before the next step of a multi-step command.
-    @MainActor
     private func waitForCompletion(of a: VoiceAction) async {
         guard let e = engine, a.isMotion else { return }
         let limit: Double
@@ -294,6 +303,7 @@ final class VoiceAssistant: ObservableObject {
             case .goToPoint: return "Going there"
             case .setMode(let m): return "\(m.capitalized) mode"
             case .clearGoal: return "Goal cleared"
+            case .savePlace(let n): return "Saved \(n)"
             case .status: return ""
             case .say(let s): return s
             }
@@ -303,7 +313,6 @@ final class VoiceAssistant: ObservableObject {
 
     // MARK: state for the model and for "status"
 
-    @MainActor
     func stateSummary(spoken: Bool = false) -> String {
         guard let e = engine else { return "navigation not running" }
         let h = e.hud
@@ -328,7 +337,6 @@ final class VoiceAssistant: ObservableObject {
         return parts.joined(separator: spoken ? ", " : "; ") + (spoken ? "." : "")
     }
 
-    @MainActor
     func statusJSON() -> String {
         guard let e = engine else { return "{}" }
         let h = e.hud
@@ -340,6 +348,7 @@ final class VoiceAssistant: ObservableObject {
             o[k] = (v * 100).rounded() / 100
         }
         o["known_objects"] = e.roomItems.map(\.label)
+        o["saved_places"] = places.keys.sorted()
         guard let d = try? JSONSerialization.data(withJSONObject: o) else { return "{}" }
         return String(decoding: d, as: UTF8.self)
     }
