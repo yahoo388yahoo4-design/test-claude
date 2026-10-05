@@ -53,7 +53,7 @@ Build it yourself (Linux, no root): see §7.
 | Mode | What runs | Poses on device | Depth | Output |
 |---|---|---|---|---|
 | **A: ARCore RGB-D** (default, best for reconstruction) | ARCore session on the main wide camera, best 4:3 CPU image config, Depth API `AUTOMATIC` (raw + smoothed), HDR light estimation, planes, point cloud, optional Geospatial / SharedCamera hi-res stills / ARCore Recording API mp4 | yes, every frame | ARCore raw depth + confidence, smoothed depth | full r2s session; convert straight to ARKitScenes + LiteReality |
-| **B: Camera2 multi-cam** (no live preview) | logical rear camera with every physical lens the HAL streams at once (one HEVC per lens), RAW DNG every 1 s, full CaptureResult per frame, ToF `DEPTH16` if exposed | no (recover offline) | ToF DEPTH16 only if Xiaomi exposes it | `cams/*`; run `recover_poses.py` first |
+| **B: Camera2 multi-cam** (live preview of the main lens) | logical rear camera with every physical lens the HAL streams at once (one HEVC per lens, stepped down to fit the hardware budget), RAW DNG every 1 s, full CaptureResult per frame, ToF `DEPTH16` if exposed | no (recover offline) | ToF DEPTH16 only if Xiaomi exposes it | `cams/*`; run `recover_poses.py` first |
 | **Sensors only** | IMU / GNSS / baro / status only | – | – | sensor logs |
 
 The IMU (accelerometer, gyro, uncalibrated variants, magnetometer, rotation vectors) runs at the HAL
@@ -84,6 +84,92 @@ Options (checkboxes):
   Otherwise it is skipped. It records the Earth/VPS camera pose (lat/lon/alt/heading quaternion and
   accuracies) per frame.
 
+### Live view while recording
+
+* **Mode A** draws what has been captured so far on top of the camera image: a 3D point cloud of the
+  ARCore depth (coloured by height above the floor), a top-down occupancy map with your path
+  (top right), and a HUD with frames, depth, points, mapped area, distance walked, speed and a
+  72-beam virtual lidar of the nearest surfaces. Long-press the map to hide or show the 3D points.
+  The map is saved with the session (`extras/map/`) and under `maps/` for navigation mode.
+* **Mode B** shows the main lens live, with a coverage panorama on top: a yaw × pitch grid filled in by
+  how long the phone pointed each way (from the game rotation vector), plus live per-lens frame,
+  RAW, ToF and capture-result counts. The preview never disappears: it is an extra preview stream
+  on the main lens when the HAL accepts one (`preview_kind: "preview_surface"`); otherwise the
+  recorded main stream itself is shown through surface sharing, which costs no extra camera stream
+  (`"recorded_stream"`). Only if neither can be configured is it `"none"`.
+* **Mode B hardware budget** (like the iOS app): if the HAL refuses the requested lenses at 1920 px /
+  30 fps (`isSessionConfigurationSupported`, or a failed session / encoder), the app steps down to
+  1280 px, then 24 fps, then drops the lowest-priority lens one at a time until a configuration
+  works. The status line shows what it changed (`budget: reduced to 1280 px, dropped tele_4`), and
+  `session.json` records it under `android.multicam` (`budget_actions`, `budget_requested`,
+  `preview_kind`, `preview_size`, per-stream `w`/`h`/`fps`) and in a top-level `multicam` block in the
+  iOS shape (`budget_actions`, `preview`, `streams[].width/height/fps`).
+
+### Navigation mode (phone on a robot)
+
+The **Navigate** button opens a separate screen for driving a two-wheeled robot with the phone as its
+only sensor. It talks to the robot with the same protocol as the iPhone app
+([`robot/PROTOCOL.md`](../robot/PROTOCOL.md)), so the same receivers work with both phones:
+`robot/receiver.py` (Python: sim, serial, Raspberry Pi GPIO), `robot/esp32_diffdrive` (ESP32 with Wi-Fi
+and BLE) and `robot/serial_motor` (Arduino bridge). See [`NAVIGATION.md`](../NAVIGATION.md).
+
+1. **Map.** Walk or drive around; ARCore depth builds a 5 cm occupancy grid and a point cloud. Or press
+   **Load map** to bring back a map saved by mode A or by an earlier navigation run, then **Align**
+   (scan matching of the live map against the saved one) or **Same start** (you started where the
+   saved map started).
+2. **Goal.** Tap the top-down map, or tap the floor in the camera view. A* plans a path that keeps the
+   robot radius away from obstacles and replans every 0.5 s as the map changes.
+3. **Guide / Auto / Manual.** *Guide*: arrow, text and voice ("turn left 40 degrees", "go straight
+   1.2 meters"), parking-style beeps under 1.2 m and haptics; nothing is sent to the robot. *Auto*: the
+   phone drives the robot along the path with `vel` commands at 10 Hz, slows between the slow and stop
+   distances, backs up when blocked for 3 s and the way behind is clear, and says "Goal reached".
+   *Manual*: an on-screen joystick (with the same front safety stop).
+4. **Moves and turns.** "▲ Fwd / ▼ Back X cm at V cm/s" and "⟲ Left / Right ⟳ A° at W°/s". With
+   *Moves closed-loop (ARCore)* on (default) the phone measures the motion and streams velocities, so a
+   robot without encoders still moves the right distance; off, `move` / `turn` go to the robot as is.
+5. **Link.** None, Wi-Fi (`ws://192.168.4.1:8777/robot` for the ESP32 access point, or the URL
+   `receiver.py` prints) or Bluetooth LE UART (device name prefix `R2S-Robot`). **STOP** stops at once,
+   **E-stop latch** / **Release** latch the robot's emergency stop, and an `estop` from the robot (bumper,
+   button) cancels whatever the phone was doing. Tracking loss also stops the robot.
+
+The HUD shows phone and robot speed on a dial, distances front / left / right / rear with bars, the
+polar virtual lidar, the command being sent, robot link state, round-trip time, battery and wheel
+speeds, map size and tracking state. Settings (saved): phone mount height and how far ahead of the
+turning centre it sits, robot radius and height, max speed and turn rate, slow / stop distances, goal
+tolerance. Each run logs `nav/<time>/nav.jsonl` (pose, command, distances at 5 Hz).
+
+### Sessions and playback viewer
+
+**Sessions** (main screen, disabled while recording) lists the recorded sessions, newest first, with
+mode, duration, size and frame count. Each one has **Open**, **Upload** (the receiver URL field is the
+same setting as on the main screen) and **Delete** (asks first). **Open** plays the session back on
+the phone, like the iPhone app's viewer (`ios/R2SCapture/SessionViewer.swift`):
+
+* **Video.** Mode A plays `video.mp4` with the ARCore depth map (raw or smoothed) alpha-blended on
+  top. Each depth map is matched to the frame on screen by timestamp (`video.mp4.pts.csv`, then
+  `frames.jsonl`). Below the video: frame time, tracking state, position and yaw, intrinsics and
+  exposure. Mode B plays every lens video side by side, in sync on the sensor clock (each lens
+  starts at its own first timestamp). The ToF depth is shown as an extra tile when there is one,
+  with the RAW DNG and ToF counts and each lens's size, codec, K, exposure and ISO at the playhead.
+  **Rotate** turns the sensor-oriented image upright. It defaults to the camera's sensor orientation
+  and the setting is remembered.
+* **3D.** The live-map point cloud (`extras/map/points.ply`, or a `mesh.ply` when one exists)
+  coloured by height, the camera trajectory in yellow and the camera at the playhead in red. Drag to
+  orbit, pinch to zoom, use two fingers to pan, and double-tap to reset.
+* **Map.** The top-down occupancy map (`extras/map`), with the trajectory and an arrow for the camera
+  at the playhead.
+* **Sensors.** Charts of accelerometer, gyro, magnetometer, the fused IMU (user acceleration,
+  gravity, orientation, heading), barometer and relative altitude, GNSS speed, accuracy, altitude and
+  satellites, thermal state, battery level and temperature, thermal headroom, camera exposure / ISO,
+  and every other sensor in `extras/sensors_raw.csv` (light, proximity, temperature, humidity,
+  rotation vectors, …). A cursor follows the playhead, and tapping a chart seeks there. Sessions
+  without video (sensors only) get a virtual clock over the recording, so they can be played too.
+* **Info.** `session.json`, pretty-printed, and every file with its size.
+
+The transport bar (play/pause, scrubber, 0.25×–4× speed) drives all tabs. Missing files are skipped,
+and a tab with nothing to show explains why. For example, mode B has no on-device poses, so it has no
+3D or map.
+
 ## 3. Capture tips (13 Ultra)
 
 * **Mode A first.** It is the only mode with on-device poses and depth, and the converter turns it
@@ -109,10 +195,17 @@ Options (checkboxes):
   Capture, or upload over Wi-Fi.
 * **Wi-Fi:** run the shared receiver on fleet-3090 or a laptop,
   `python tools/receiver.py --root ~/captures --port 8765 --token SECRET [--convert OUT]`. Then in the
-  app enter `http://<host>:8765#SECRET` and press **Upload last**. It is the same protocol as the iOS
+  app enter `http://<host>:8765#SECRET` and press **Upload last**, or **Upload** next to any session under **Sessions**. It is the same protocol as the iOS
   app: per-file `PUT /upload/<session>/<path>`, a HEAD check so a restarted upload resumes, and a
   `.complete` marker at the end. To reach fleet-3090 from outside the LAN, use an SSH tunnel
   (`ssh -L 8765:localhost:8765 ...` from a laptop on the same Wi-Fi as the phone).
+
+* **Crash logs:** if the app crashes, the stack trace, time, device, app version and the mode that was
+  recording go to `crash_logs/crash_<unix time>.txt` next to the `sessions/` folder
+  (`/sdcard/Real2SimCapture/crash_logs/` with All files access), so `adb pull` or a USB file browser
+  finds them. The app still crashes normally afterwards. `session.json` is written with NaN /
+  infinite numbers as `null` (org.json would throw on them), and a failing writer no longer takes
+  the recording down.
 
 ## 5. Convert
 
@@ -223,8 +316,9 @@ sparser than LiDAR), real MediaCodec output, and device timing.
 * **ARCore uses one camera at a time** (the main wide). The other three rear lenses are only reachable
   in mode B, without on-device poses. Whether HyperOS lets third-party apps stream the ultrawide and
   telephotos concurrently is **unverified**. Xiaomi often restricts aux cameras to whitelisted
-  packages, and mode B then falls back to whatever subset `isSessionConfigurationSupported` accepts
-  (possibly one lens).
+  packages, and mode B then steps down its budget until the HAL accepts a configuration (possibly
+  one lens; see `budget_actions` in `session.json`). Whether surface sharing works with a physical
+  lens stream (the preview fallback) on HyperOS is also unverified.
 * **The ARCore CPU image is not the full sensor.** Typical configs top out at 1920×1080 or 1440×1080;
   the app prefers 4:3 so the 256×192 ARKitScenes frames are not distorted. Full-sensor detail needs
   the hi-res stills option.
@@ -234,5 +328,10 @@ sparser than LiDAR), real MediaCodec output, and device timing.
   vertical and horizontal planes as seeds) → room.usdz via the existing `build_arkit_scan` tooling on
   fleet-3090. That is not automated yet, and ARKitScenes `3dod_annotation.json` (object boxes) is
   equally absent.
+* **Navigation runs on motion-estimated depth.** Without LiDAR, ARCore depth needs the phone to
+  move, is sparse on blank walls and glass, and misses thin chair legs and cables; obstacles lower
+  than about 6 cm above the floor are ignored on purpose (floor noise). Keep max speed low (≤25 cm/s)
+  and stay near the robot with the STOP button. There is no relocalisation against a saved map other
+  than **Align** / **Same start**, and the map lives in one ARCore session's frame.
 * Mode A's hi-res stills, Geospatial, ToF and multi-lens streaming depend on HAL behaviour that has
   only been compiled against, not exercised on the device.

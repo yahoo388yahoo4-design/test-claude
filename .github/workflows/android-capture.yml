@@ -4,9 +4,9 @@ name: android-capture
 
 on:
   push:
-    paths: ["android/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
+    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
   pull_request:
-    paths: ["android/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
+    paths: ["android/**", "robot/**", "tools/readers/android_reader.py", ".github/workflows/android-capture.yml"]
   workflow_dispatch:
 
 jobs:
@@ -27,12 +27,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.3"
-      - name: Build debug APK + lint
+      - name: Build debug APK + lint + unit tests
         run: |
           # the wrapper jar is binary; regenerate it if the checkout does not carry it
           test -f gradle/wrapper/gradle-wrapper.jar || gradle wrapper --gradle-version 8.14.3
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug lintDebug
+          ./gradlew --no-daemon assembleDebug lintDebug testDebugUnitTest
       - name: Checksum
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk real2sim-capture-debug.apk
@@ -48,6 +48,18 @@ jobs:
         with:
           name: lint-report
           path: android/app/build/reports/lint-results-debug.*
+
+  robot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Robot receiver end-to-end test (sim backend; same receiver the iPhone app uses)
+        run: |
+          pip install websockets
+          python robot/test_receiver.py
 
   reader:
     runs-on: ubuntu-latest

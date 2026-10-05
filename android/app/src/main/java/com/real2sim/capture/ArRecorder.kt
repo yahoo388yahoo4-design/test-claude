@@ -94,6 +94,16 @@ class ArRecorder(
     private var viewW = 1
     private var viewH = 1
 
+    // Live view: map of what has been captured (3D points over the camera image + top-down map).
+    val map = MapBuilder()
+    private val cloud = PointCloudRenderer(map)
+    private val viewM = FloatArray(16)
+    private val projM = FloatArray(16)
+    private var lastK = floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f)   // fx, fy, cx, cy, w, h of the CPU image
+    private var lastPoseM = FloatArray(16)
+    private var lastHeading = 0f
+    @Volatile var showCloud = true
+
     // Shared camera (hi-res stills)
     private var shared: SharedCamera? = null
     private var camThread: HandlerThread? = null
@@ -231,6 +241,11 @@ class ArRecorder(
             put("lock", opt.lockFocus); put("geospatial", opt.geospatial)
         })
         dumpPlanesFinal()
+        try {
+            val extra = JSONObject().put("session", s.id).put("source", "mode A capture")
+            map.save(s.file("extras/map/map.json").parentFile!!, extra)
+            map.save(File(SessionWriter.sessionsRoot(activity).parentFile, "maps/${s.id}"), extra)
+        } catch (e: Exception) { Log.w(TAG, "map save", e) }
         session.close()
     }
 
@@ -238,6 +253,7 @@ class ArRecorder(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         bg.create()
+        cloud.create()
         session.setCameraTextureName(bg.textureId)
         if (opt.hiResStills && shared == null) activity.runOnUiThread { try { openSharedCamera() } catch (e: Exception) { status("shared camera failed: $e") } }
     }
@@ -256,6 +272,12 @@ class ArRecorder(
         val frame = try { session.update() } catch (e: Exception) { Log.w(TAG, "update", e); return }
         bg.draw(frame)
         try { record(frame) } catch (e: Exception) { Log.e(TAG, "record", e) }
+        if (frame.camera.trackingState == TrackingState.TRACKING) {
+            frame.camera.getViewMatrix(viewM, 0)
+            frame.camera.getProjectionMatrix(projM, 0, 0.05f, 50f)
+            cloud.visible = showCloud
+            cloud.draw(viewM, projM, null, null)
+        }
     }
 
     private var lastFrameTs = -1L
@@ -302,6 +324,13 @@ class ArRecorder(
         val K = JSONArray(listOf(k.focalLength[0].toDouble(), k.focalLength[1].toDouble(), k.principalPoint[0].toDouble(), k.principalPoint[1].toDouble()))
         val kw = k.imageDimensions[0]; val kh = k.imageDimensions[1]
         o.put("K", K); o.put("w", kw); o.put("h", kh)
+        lastK = floatArrayOf(k.focalLength[0], k.focalLength[1], k.principalPoint[0], k.principalPoint[1], kw.toFloat(), kh.toFloat())
+        if (cam.trackingState == TrackingState.TRACKING) {
+            cam.pose.toMatrix(lastPoseM, 0)
+            lastHeading = kotlin.math.atan2(-lastPoseM[10], -lastPoseM[8])
+            map.addPose(lastPoseM[12], lastPoseM[13], lastPoseM[14], tNs)
+            if (frameIdx % 30 == 0) updateFloor()
+        }
         cam.textureIntrinsics.let { t ->
             o.put("K_tex", JSONArray(listOf(t.focalLength[0].toDouble(), t.focalLength[1].toDouble(),
                 t.principalPoint[0].toDouble(), t.principalPoint[1].toDouble(), t.imageDimensions[0], t.imageDimensions[1])))
@@ -399,6 +428,7 @@ class ArRecorder(
                 if (d.timestamp != lastDepthTs) {
                     lastDepthTs = d.timestamp
                     val r = sdepthBlob.append(plane(d, 2))
+                    if (frame.camera.trackingState == TrackingState.TRACKING) integrate(frame, d)
                     o.put("smooth_depth", JSONObject().apply { put("t", d.timestamp / 1e9); put("sd", r); put("w", d.width); put("h", d.height) })
                     lineFor(d.timestamp)?.apply { put("sd", r); if (!has("dw")) { put("dw", d.width); put("dh", d.height) } }
                     depthCount++
@@ -406,6 +436,39 @@ class ArRecorder(
             }
         } catch (_: NotYetAvailableException) {} catch (_: IllegalStateException) {}
     }
+
+    /** Smoothed depth -> live map (points + occupancy). Uses the pose of the frame the depth belongs to. */
+    private fun integrate(frame: Frame, d: Image) {
+        val k = lastK
+        if (k[4] <= 0f) return
+        val sx = d.width / k[4]; val sy = d.height / k[5]
+        val m = FloatArray(16)
+        frame.camera.pose.toMatrix(m, 0)
+        val p = d.planes[0]
+        map.integrateDepth(p.buffer, d.width, d.height, p.rowStride, k[0] * sx, k[1] * sy, k[2] * sx, k[3] * sy, m, lastHeading, d.timestamp)
+    }
+
+    /** Floor height = lowest large upward-facing plane; else 1.4 m below the first tracked camera position. */
+    private fun updateFloor() {
+        var best = Float.NaN
+        for (p in session.getAllTrackables(Plane::class.java)) {
+            if (p.trackingState != TrackingState.TRACKING || p.type != Plane.Type.HORIZONTAL_UPWARD_FACING || p.subsumedBy != null) continue
+            if (p.extentX * p.extentZ < 0.3f) continue
+            val y = p.centerPose.ty()
+            if (best.isNaN() || y < best) best = y
+        }
+        if (!best.isNaN()) map.floorY = best
+        else if (map.floorY.isNaN() && map.traj.isNotEmpty()) map.floorY = map.traj[0][1] - 1.4f
+    }
+
+    fun heading() = lastHeading
+
+    /** Snapshot for the UI thread: stats lines. */
+    fun liveStats(): List<String> = listOf(
+        "frames $videoIdx  depth $depthCount  tracked $trackedFrames",
+        "map %.1f m2  points %d  walked %.1f m".format(map.knownAreaM2(), map.pointCount, map.travelled),
+        "floor %s".format(if (map.floorY.isNaN()) "?" else "%.2f m".format(map.floorY)),
+    )
 
     private fun plane(img: Image, bpp: Int): ByteArray {
         val p = img.planes[0]

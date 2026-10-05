@@ -122,6 +122,20 @@ class VideoEncoder(
         }
     }
 
+    /** Release without finishing the file and delete it and its pts.csv (a configuration attempt that was not used). */
+    fun discard() {
+        synchronized(lock) {
+            if (stopped) return
+            stopped = true
+            try { codec.stop() } catch (_: Exception) {}
+            try { codec.release() } catch (_: Exception) {}
+            try { muxer.release() } catch (_: Exception) {}
+            inputSurface?.release()
+            try { pts.close() } catch (_: Exception) {}
+            file.delete(); File(file.path + ".pts.csv").delete()
+        }
+    }
+
     companion object {
         fun hasEncoder(mime: String): Boolean =
             MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } }

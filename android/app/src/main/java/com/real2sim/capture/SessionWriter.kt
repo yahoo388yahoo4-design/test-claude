@@ -41,6 +41,7 @@ class SessionWriter(context: Context, val mode: String) {
     @Volatile private var pending = 0
 
     init {
+        CrashLog.currentMode = mode
         File(dir, "extras").mkdirs()
         frames = File(dir, "frames.jsonl").bufferedWriter()
         meta.put("format", "r2s-capture")
@@ -108,7 +109,7 @@ class SessionWriter(context: Context, val mode: String) {
         }
     }
 
-    fun frame(obj: JSONObject) = submit(4096) { frames.write(obj.toString()); frames.write("\n") }
+    fun frame(obj: JSONObject) = submit(4096) { frames.write(JsonSafe.stringify(obj)); frames.write("\n") }
 
     /** Append a line to a CSV (created with header on first use). Thread-safe through the IO thread. */
     fun csv(rel: String, header: String, line: String) = submit(65536) {
@@ -130,14 +131,30 @@ class SessionWriter(context: Context, val mode: String) {
         meta.put("end_unix", c.first); meta.put("end_uptime", c.second)
         meta.extra()
         io.execute {
-            frames.close()
-            open.values.forEach { it.close() }
-            meta.put("dropped_writes", droppedWrites)
-            File(dir, "session.json").writeText(meta.toString(2))
-            File(dir, "DONE").writeText("ok\n")
+            // Each step on its own: a failing writer must not cost session.json or DONE.
+            try { frames.close() } catch (e: Exception) { android.util.Log.e("SessionWriter", "close frames", e) }
+            open.values.forEach { w -> try { w.close() } catch (e: Exception) { android.util.Log.e("SessionWriter", "close", e) } }
+            writeSessionJson()
+            try { File(dir, "DONE").writeText("ok\n") } catch (e: Exception) { android.util.Log.e("SessionWriter", "DONE", e) }
         }
         io.shutdown()
-        io.awaitTermination(60, TimeUnit.SECONDS)
+        try { io.awaitTermination(60, TimeUnit.SECONDS) } catch (_: InterruptedException) {}
+        CrashLog.currentMode = "idle"
+    }
+
+    /** session.json with non-finite numbers as null; on any failure a minimal file that says why. */
+    private fun writeSessionJson() {
+        val f = File(dir, "session.json")
+        try {
+            JsonSafe.put(meta, "dropped_writes", droppedWrites)
+            f.writeText(JsonSafe.stringify(meta, 2))
+        } catch (e: Exception) {
+            android.util.Log.e("SessionWriter", "session.json", e)
+            try {
+                f.writeText(JSONObject().put("format", "r2s-capture").put("version", 1).put("platform", "android")
+                    .put("mode", mode).put("session_json_error", e.toString()).toString(2))
+            } catch (_: Exception) {}
+        }
     }
 
     companion object {
