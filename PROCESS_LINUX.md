@@ -14,17 +14,25 @@ sudo apt install usbmuxd
 
 ## 2. Copy sessions off the phone
 
-**Quickest: one command over USB (nothing to tap in the app).** Plug in the iPhone, unlock it, then:
+**Quickest: one command over USB: copy, convert and publish to the datasets hub.** Plug in the
+iPhone, unlock it, then:
 
 ```bash
 cd ~/r2s-capture && git pull                    # get the latest tools
-~/r2s-venv/bin/python ~/r2s-capture/tools/pull_iphone.py --convert ~/converted
+~/r2s-venv/bin/python ~/r2s-capture/tools/pull_iphone.py --space lab
 ```
 
-It finds the app on the phone, copies every finished session that isn't already in `~/captures`, and
-converts each new one into `~/converted/<session>/` (ARKitScenes + LiteReality). Leave out `--convert` to
-only copy. Other options: `--list` (show what's on the phone), `--session NAME`, `--dest DIR`. Re-running
-is safe and resumes an interrupted copy. First time only: tap **Trust** on the phone when asked.
+For every finished session not yet on this computer it:
+1. copies it to `~/captures/<session>/` (nothing to tap in the app),
+2. converts it to `~/converted/<session>/` (ARKitScenes + LiteReality),
+3. publishes it to the datasets hub on fleet-3090: rsync to `/root/real2sim-claude/work/incoming/`, then
+   `hub_export.py` into `/data/datasets/r2s-captures` and `hub_align.py` for the space, so all captures of
+   one room line up. It shows up at http://192.168.1.188:8062/datasets/r2s-captures.
+
+`--space` names the room; use the same name for every capture of the same room. Skip steps with
+`--no-publish` / `--no-convert`. Other options: `--list`, `--session NAME`, `--dest DIR`, `--host`
+(default `fleet-3090`, as in your `~/.ssh/config`), `--ssh-key`. Re-running is safe and resumes an
+interrupted copy. First time only: tap **Trust** on the phone when asked.
 
 **Option A: Wi-Fi (phone and computer on the same network).** On the computer:
 

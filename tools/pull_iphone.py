@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Copy R2S Capture sessions off an iPhone over USB, without touching the app.
+"""Copy R2S Capture sessions off an iPhone over USB, convert them, and publish them to the datasets hub.
 
-    python pull_iphone.py                          # copy every new session to ~/captures
-    python pull_iphone.py --convert ~/converted    # ...and convert each new one (ARKitScenes + LiteReality)
+    python pull_iphone.py --space lab              # copy new sessions, convert, publish (the default: all three)
+    python pull_iphone.py --no-publish             # copy + convert only
+    python pull_iphone.py --no-publish --no-convert   # copy only
     python pull_iphone.py --list                   # only list what is on the phone
-    python pull_iphone.py --session 20261004_221530_arkit_rgbd
+    python pull_iphone.py --session 20261004_221530_arkit_rgbd --space lab
+
+Steps for each session that is new on this computer:
+  1. copy   the phone's Documents/sessions/<session> -> ~/captures/<session>
+  2. convert  tools/convert.py -> ~/converted/<session>/ (ARKitScenes + LiteReality)
+  3. publish  rsync to fleet-3090 /root/real2sim-claude/work/incoming/<session>, then on fleet-3090 run
+             tools/hub_export.py into /data/datasets/r2s-captures with --space, and tools/hub_align.py
+             for that space so captures of one room share one frame. The hub picks it up without a restart.
 
 Needs `pip install pymobiledevice3` and usbmuxd (Ubuntu: `sudo apt install usbmuxd`). Unlock the phone
 and tap Trust the first time. It reads the app's Documents folder through Apple's house_arrest service
@@ -20,12 +28,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REMOTE_ROOT = "/root/real2sim-claude"          # fleet-3090 house rule: work only here (plus the hub folder)
 
 try:
     from pymobiledevice3.exceptions import AfcFileNotFoundError
@@ -153,20 +163,100 @@ async def run(a) -> int:
     if a.list:
         return 0
     print(f"Copied {len(new_sessions)} session(s) to {dest}")
-    if a.convert and new_sessions:
+    if not new_sessions:
+        return 0
+    failed = 0
+    if not a.no_convert:
         out = Path(a.convert).expanduser()
         for s in new_sessions:
             print(f"Converting {s.name} -> {out / s.name}")
             r = subprocess.run([sys.executable, str(HERE / "convert.py"), str(s), "--out", str(out / s.name)])
             if r.returncode != 0:
+                failed += 1
                 print(f"  convert.py failed for {s.name} (exit {r.returncode})")
-    return 0
+    if not a.no_publish:
+        failed += publish(new_sessions, a)
+    return 1 if failed else 0
+
+
+# MARK: publish to the datasets hub on fleet-3090
+
+def ssh_base(a) -> list[str]:
+    cmd = ["ssh", "-o", "BatchMode=yes"]
+    if a.ssh_key:
+        cmd += ["-i", str(Path(a.ssh_key).expanduser())]
+    return cmd
+
+
+def remote(a, script: str, capture: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(ssh_base(a) + [a.host, "bash", "-lc", shlex.quote(script)],
+                          capture_output=capture, text=True)
+
+
+def align_args(usage: str, hub: str, space: str) -> list[str]:
+    """hub_align.py lives on fleet-3090 (datasets hub thread); build its arguments from its own --help."""
+    args = []
+    for opt in ("--hub", "--root", "--out", "--dataset", "--datasets"):
+        if opt in usage:
+            args += [opt, hub]
+            break
+    else:
+        args.append(hub)
+    if "--space" in usage:
+        args += ["--space", space]
+    else:
+        args.append(space)
+    return args
+
+
+def publish(sessions: list[Path], a) -> int:
+    py = (f"PY=$(ls {REMOTE_ROOT}/.venv/bin/python {REMOTE_ROOT}/venv/bin/python {REMOTE_ROOT}/env/bin/python "
+          f"2>/dev/null | head -1); PY=${{PY:-python3}}")
+    tools = f"{REMOTE_ROOT}/src/capture/tools"
+    check = remote(a, f"{py}; test -f {tools}/hub_export.py && test -f {tools}/hub_align.py && echo ok", capture=True)
+    if check.returncode != 0 or "ok" not in check.stdout:
+        print(f"Publish skipped: can't reach {a.host} or {tools}/hub_export.py / hub_align.py are missing there.\n"
+              f"  ssh said: {(check.stderr or check.stdout).strip()[:300]}")
+        return 1
+    failed = 0
+    incoming = f"{REMOTE_ROOT}/work/incoming"
+    for s in sessions:
+        print(f"Publishing {s.name} to {a.host}:{a.hub} (space {a.space})")
+        rsh = " ".join(shlex.quote(x) for x in ssh_base(a))
+        r = subprocess.run(["rsync", "-a", "--partial", "-e", rsh, f"{s}/", f"{a.host}:{incoming}/{s.name}/"])
+        if r.returncode != 0:
+            print(f"  rsync failed (exit {r.returncode})")
+            failed += 1
+            continue
+        r = remote(a, f"{py}; cd {tools} && $PY hub_export.py {shlex.quote(f'{incoming}/{s.name}')} "
+                      f"--out {shlex.quote(a.hub)} --space {shlex.quote(a.space)}")
+        if r.returncode != 0:
+            print(f"  hub_export.py failed (exit {r.returncode})")
+            failed += 1
+    usage = remote(a, f"{py}; cd {tools} && $PY hub_align.py --help", capture=True).stdout
+    args = " ".join(shlex.quote(x) for x in align_args(usage, a.hub, a.space))
+    print(f"Aligning space {a.space}: hub_align.py {args}")
+    r = remote(a, f"{py}; cd {tools} && $PY hub_align.py {args}")
+    if r.returncode != 0:
+        print(f"  hub_align.py failed (exit {r.returncode}); its usage on {a.host}:\n{usage}")
+        failed += 1
+    if not failed:
+        print(f"Published. Open http://192.168.1.188:8062/datasets/{Path(a.hub).name}")
+    return failed
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dest", default="~/captures", help="where sessions are copied (default ~/captures)")
-    ap.add_argument("--convert", metavar="OUT", help="run convert.py on each newly copied session into OUT/<session>")
+    ap.add_argument("--convert", metavar="OUT", default="~/converted",
+                    help="where converted outputs go (default ~/converted)")
+    ap.add_argument("--no-convert", action="store_true", help="skip the convert step")
+    ap.add_argument("--no-publish", action="store_true", help="skip publishing to the datasets hub")
+    ap.add_argument("--space", default="default",
+                    help="hub space (room) name; captures of the same room share one space (default: default)")
+    ap.add_argument("--host", default="fleet-3090", help="ssh host of the datasets hub (default fleet-3090)")
+    ap.add_argument("--ssh-key", help="ssh private key, if ~/.ssh/config doesn't set one for the host")
+    ap.add_argument("--hub", default="/data/datasets/r2s-captures", help="dataset folder on the hub host")
     ap.add_argument("--list", action="store_true", help="only list the sessions on the phone")
     ap.add_argument("--session", nargs="+", help="copy only these session folder names")
     ap.add_argument("--include-incomplete", action="store_true", help="also copy sessions without complete=true")
