@@ -136,6 +136,7 @@ class ArRecorder(
     private var stillTicker: Runnable? = null
     private val stillIndex = java.util.concurrent.ConcurrentLinkedQueue<Pair<Long, String>>()
     @Volatile private var arActive = false
+    @Volatile private var released = false
 
     fun create(): String? {
         val features = if (opt.hiResStills) EnumSet.of(Session.Feature.SHARED_CAMERA) else EnumSet.noneOf(Session.Feature::class.java)
@@ -241,6 +242,8 @@ class ArRecorder(
      * partial [create].
      */
     fun release() {
+        if (released) return
+        released = true
         recording = false
         try { view.onPause() } catch (_: Exception) {}           // stop the GL thread before touching the session
         stillTicker?.let { camHandler?.removeCallbacks(it) }
@@ -719,7 +722,7 @@ class ArRecorder(
             stillCount++
             val rel = "hires/hires_%.6f.jpg".format(java.util.Locale.US, ts / 1e9)
             stillIndex.add(Pair(ts, rel))
-            s.submit {
+            s.submit(256) {
                 val bos = ByteArrayOutputStream()
                 YuvImage(nv21, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), 95, bos)
                 s.file(rel).writeBytes(bos.toByteArray())

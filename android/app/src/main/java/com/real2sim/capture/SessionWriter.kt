@@ -151,7 +151,7 @@ class SessionWriter(context: Context, val mode: String) {
     fun bytes(rel: String, b: ByteArray) = submit { file(rel).writeBytes(b) }
 
     /** raw-deflate a buffer into its own file (point clouds etc.). */
-    fun deflateFile(rel: String, data: ByteArray) = submit {
+    fun deflateFile(rel: String, data: ByteArray) = submit(256) {
         DeflaterOutputStream(FileOutputStream(file(rel)), Deflater(1, true)).use { it.write(data) }
     }
 

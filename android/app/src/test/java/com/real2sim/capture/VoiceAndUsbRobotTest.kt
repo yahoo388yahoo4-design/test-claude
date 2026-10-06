@@ -143,8 +143,8 @@ class VoiceAndUsbRobotTest {
         assertTrue("expected repeated setmotor writes, got $repeats", repeats >= 4)
         assertTrue(neato.status().getBoolean("busy"))
         assertTrue(out.none { it.optString("type") == "done" })
-        neato.handleNow("""{"type":"stop","seq":8}""")
-        Thread.sleep(50)
+        neato.handle("""{"type":"stop","seq":8}""")   // queued on the executor, behind any in-flight refresh tick
+        Thread.sleep(100)
         val mark = wrote.size
         Thread.sleep(300)
         assertEquals("setmotor 0 0 0\n", wrote[mark - 1])

@@ -64,7 +64,7 @@ class SessionsActivity : AppCompatActivity() {
         showReceiver()
         // Upload state lives in Uploader so it survives recreation (rotation, Done + reopen): rebind and restore.
         Uploader.listener = { msg -> runOnUiThread { if (!isDestroyed) setStatus(msg) } }
-        Uploader.lastStatus.takeIf { it.isNotEmpty() }?.let { setStatus(it) }
+        if (Uploader.running != null) Uploader.lastStatus.takeIf { it.isNotEmpty() }?.let { setStatus(it) }
         refresh()
     }
 

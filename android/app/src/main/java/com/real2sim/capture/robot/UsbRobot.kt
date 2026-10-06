@@ -145,6 +145,7 @@ class RobotCore(
 
     fun close() {
         ex.execute {
+            cancelJob()                 // a pending move/turn completion must not fire after the port is gone
             drive(0.0, 0.0)
             if (kind == UsbRobotKind.NEATO) write("testmode off\n")
         }
@@ -393,12 +394,12 @@ class UsbRobot(private val ctx: Context, private val kind: UsbRobotKind, private
     }
 
     override fun close() {
-        closed = true
+        val c = synchronized(pending) { closed = true; core.also { core = null } }
         receiver?.let { try { ctx.unregisterReceiver(it) } catch (_: Exception) {} }
         receiver = null
         detachReceiver?.let { try { ctx.unregisterReceiver(it) } catch (_: Exception) {} }
         detachReceiver = null
-        core?.close(); core = null
+        c?.close()
         io?.stop(); io = null
         try { port?.close() } catch (_: Exception) {}
         port = null

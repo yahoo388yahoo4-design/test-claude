@@ -702,7 +702,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     private fun resetMap() {
-        goal = null; path = null
+        clearGoal()
         gl.queueEvent {
             map = MapBuilder().also { it.maxObstacleHeight = robotHeight + 0.1f }
             fusion.close()
@@ -912,8 +912,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 else task = if (goal != null && drive == Drive.AUTO) Task.Follow else Task.Idle
             is Task.Move -> {
                 // progress from the phone pose: the same point the task's start (sx, sz) was taken from
-                val travelled = (x - t.sx) * kotlin.math.cos(t.h) + (z - t.sz) * kotlin.math.sin(t.h)
-                val remaining = abs(t.dist) - abs(travelled)
+                val travelled = NavMath.travelledAlong(x, z, t.sx, t.sz, t.h)
+                val remaining = NavMath.moveRemaining(t.dist, x, z, t.sx, t.sz, t.h)
                 if (remaining <= 0.01f || now - t.began > (abs(t.dist) / maxOf(0.02f, t.speed) * 3 + 3) * 1000) {
                     task = Task.Idle; guide.say("Done", force = true)
                 } else {

@@ -120,7 +120,7 @@ class NavMathTest {
      * short move, report it done before the robot moved).
      */
     @Test fun closedLoopMoveProgressUsesTheSamePointAsItsStart() {
-        fun travelled(px: Float, pz: Float, sx: Float, sz: Float, h: Float) = (px - sx) * cos(h) + (pz - sz) * sin(h)
+        fun travelled(px: Float, pz: Float, sx: Float, sz: Float, h: Float) = NavMath.travelledAlong(px, pz, sx, sz, h)
         val h = 0.7f; val mountForward = 0.15f; val dist = 0.10f
         val sx = 1.0f; val sz = -2.0f                         // phone pose at the start (what Task.Move records)
         // phone after driving `dist` along the heading
@@ -133,6 +133,8 @@ class NavMathTest {
         assertTrue("10 cm move would look done (|travelled| >= dist) before the robot moved", abs(travelled(rx0, rz0, sx, sz, h)) >= dist)
         val rx1 = px - mountForward * cos(h); val rz1 = pz - mountForward * sin(h)
         assertEquals(dist - mountForward, travelled(rx1, rz1, sx, sz, h), 1e-6f)
+        assertEquals(0f, NavMath.moveRemaining(dist, px, pz, sx, sz, h), 1e-6f)   // arrived exactly when the phone moved dist
+        assertEquals(dist, NavMath.moveRemaining(dist, sx, sz, sx, sz, h), 1e-6f)  // nothing done at the start
     }
 
     @Test fun unreachableGoalReturnsNull() {
