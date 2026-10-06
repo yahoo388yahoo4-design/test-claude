@@ -111,6 +111,7 @@ class Camera2Recorder(
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var rawReader: ImageReader? = null
+    private var confBlob: SessionWriter.Blob? = null
     private var rawStream: Stream? = null
     private var rawAllowed = opt.rawDng
     private val pendingRaw = ConcurrentHashMap<Long, TotalCaptureResult>()
@@ -473,7 +474,7 @@ class Camera2Recorder(
         val reader = ImageReader.newInstance(sz.width, sz.height, ImageFormat.DEPTH16, 4)
         depthReader = reader
         depthBlob = s.Blob("cams/tof_depth.zlib.bin")
-        val confBlob = s.Blob("cams/tof_conf.zlib.bin")
+        val confBlob = s.Blob("cams/tof_conf.zlib.bin").also { this.confBlob = it }
         val jsonl = "cams/tof_depth.jsonl"
         val k = c.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
         reader.setOnImageAvailableListener({ r ->
@@ -578,6 +579,21 @@ class Camera2Recorder(
             "\npreview: $previewKind" + (if (budgetActions.isEmpty()) "" else "   budget: " + budgetActions.joinToString(", "))
 
     // ------------------------------------------------------------------ stop
+    /** Cleanup after start() failed: nothing to join, just free the camera, encoders and the thread. */
+    fun release() {
+        running = false
+        stopped = true
+        try { session?.close() } catch (_: Exception) {}
+        try { device?.close() } catch (_: Exception) {}
+        try { depthDevice?.close() } catch (_: Exception) {}
+        rawReader?.close(); depthReader?.close()
+        for (st in candidates) { try { st.encoder?.discard() } catch (_: Exception) {}; st.encoder = null }
+        try { depthBlob?.close() } catch (_: Exception) {}
+        try { confBlob?.close() } catch (_: Exception) {}
+        previewSurface?.release(); previewSurface = null
+        thread.quitSafely()
+    }
+
     fun stop() {
         running = false
         stopped = true
@@ -595,6 +611,7 @@ class Camera2Recorder(
         device?.close(); depthDevice?.close()
         rawReader?.close(); depthReader?.close()
         try { depthBlob?.close() } catch (_: Exception) {}
+        try { confBlob?.close() } catch (_: Exception) {}
         previewSurface?.release(); previewSurface = null
         // Join per-frame results to video samples -> cams/<name>.jsonl (FORMAT.md mode C).
         var nTotal = 0

@@ -84,7 +84,12 @@ class DepthFusion(
         if (closed) return
         submitted++
         if (slot.getAndSet(f) != null) dropped++
-        if (scheduled.compareAndSet(false, true)) exec.execute(::drain)
+        if (scheduled.compareAndSet(false, true)) schedule()
+    }
+
+    /** close() can shut the executor down between the `closed` check and execute(): never let that crash a caller. */
+    private fun schedule() {
+        try { exec.execute(::drain) } catch (_: java.util.concurrent.RejectedExecutionException) { scheduled.set(false) }
     }
 
     private fun drain() {
@@ -92,7 +97,7 @@ class DepthFusion(
             while (true) { val f = slot.getAndSet(null) ?: break; try { process(f) } catch (e: Exception) { lastError = e.toString() } }
         } finally {
             scheduled.set(false)
-            if (slot.get() != null && !closed && scheduled.compareAndSet(false, true)) exec.execute(::drain)
+            if (slot.get() != null && !closed && scheduled.compareAndSet(false, true)) schedule()
         }
     }
 
@@ -177,11 +182,18 @@ class DepthFusion(
      */
     fun finish(floorY: Float = Float.NaN, timeoutMs: Long = 30_000): Result? {
         if (closed) return null
-        val fut = exec.submit<Result?> {
-            slot.getAndSet(null)?.let { try { process(it) } catch (_: Exception) {} }
-            if (fused == 0) null else buildResult(floorY)
-        }
-        return try { fut.get(timeoutMs, TimeUnit.MILLISECONDS) } catch (e: Exception) { lastError = e.toString(); null } finally { close() }
+        val fut = try {
+            exec.submit<Result?> {
+                slot.getAndSet(null)?.let { try { process(it) } catch (_: Exception) {} }
+                if (fused == 0) null else buildResult(floorY)
+            }
+        } catch (e: java.util.concurrent.RejectedExecutionException) { lastError = e.toString(); close(); return null }
+        return try { fut.get(timeoutMs, TimeUnit.MILLISECONDS) } catch (e: Exception) {
+            lastError = e.toString()
+            // On timeout do not leave the extraction running (CPU + memory) after the UI says "Saved".
+            fut.cancel(true)
+            null
+        } finally { close() }
     }
 
     fun close() { closed = true; exec.shutdown() }

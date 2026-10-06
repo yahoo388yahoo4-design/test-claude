@@ -79,14 +79,23 @@ class MainActivity : AppCompatActivity() {
             if (writer != null) { status("stop recording first"); return@setOnClickListener }
             startActivity(android.content.Intent(this, SessionsActivity::class.java))
         }
-        requestPerms()
-        if (Build.VERSION.SDK_INT >= 30 && !SessionWriter.allFilesAccess()) {
-            // Optional: lets sessions go to /sdcard/Real2SimCapture where adb pull always works.
-            try {
-                startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    android.net.Uri.parse("package:$packageName")))
-            } catch (_: Exception) {}
-        }
+        if (!requestPerms()) offerAllFilesAccess()
+    }
+
+    /**
+     * Optional: lets sessions go to /sdcard/Real2SimCapture where adb pull always works. Asked once, and only
+     * after the runtime permissions (the Settings screen would otherwise land on top of their dialog and
+     * cancel it on every launch).
+     */
+    private fun offerAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < 30 || SessionWriter.allFilesAccess()) return
+        val prefs = getSharedPreferences("capture", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("asked_all_files", false)) return
+        prefs.edit().putBoolean("asked_all_files", true).apply()
+        try {
+            startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                android.net.Uri.parse("package:$packageName")))
+        } catch (_: Exception) {}
     }
 
     /** Live camera while idle (like iOS); the recorders get the camera only after it is released. */
@@ -105,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (writer == null && !notResumed()) startPreview()
+        offerAllFilesAccess()
     }
 
     private fun notResumed() = !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
@@ -185,10 +195,12 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private fun requestPerms() {
+    /** Asks for whatever is missing; true if a dialog was shown. */
+    private fun requestPerms(): Boolean {
         val perms = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.RECORD_AUDIO)
         val missing = perms.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), 1)
+        return missing.isNotEmpty()
     }
 
     private fun status(s: String) = runOnUiThread { statusView.text = s }
@@ -199,19 +211,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startRecording() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPerms(); return }
         val s = settings
         val m = s.mode
+        // Sensors-only (mode C) has no camera; the other two need it.
+        if (m != CaptureMode.SENSORS && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPerms(); return }
         stopPreview()      // the recorder needs the camera (ARCore session / CameraDevice) to itself
         val w = SessionWriter(this, m.id)
         writer = w
         sensors = SensorRecorder(this, w).also { it.start(recordAudio = s.recordAudio) }
+        // Whatever was created before a failure is released in the catch below: a half-started recorder would
+        // otherwise keep the camera (ARCore session / CameraDevice) and cover the idle preview with a dead view.
+        var arRec: ArRecorder? = null
+        var camRec: Camera2Recorder? = null
         try {
             when (m) {
                 CaptureMode.RGBD -> {
                     val r = ArRecorder(this, w, ArOptions(hiResStills = s.hiResStills, arcoreMp4 = s.arcoreMp4,
                         lockFocus = s.lock, geospatial = s.geospatial), ::status)
-                    r.create()?.let { err -> status(err); abort(); return }
+                    arRec = r
+                    r.create()?.let { err -> throw IllegalStateException(err) }
                     previewHost.addView(r.view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                     r.start()
                     ar = r
@@ -219,10 +237,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 CaptureMode.MULTICAM -> {
                     val r = Camera2Recorder(this, w, Camera2Options(rawDng = s.rawDng, lock = s.lock, oisOff = s.oisOff), ::status)
+                    camRec = r
                     // live preview behind the coverage overlay (its surface must exist before the session is configured)
                     previewHost.addView(r.previewView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, android.view.Gravity.CENTER))
-                    val err = try { r.start() } catch (e: Exception) { "camera start failed: $e" }
-                    if (err != null) { previewHost.removeView(r.previewView); status(err); abort(); return }
+                    r.start()?.let { err -> throw IllegalStateException(err) }
                     cam2 = r
                     val cv = CoverageView(this)
                     previewHost.addView(cv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
@@ -234,7 +252,12 @@ class MainActivity : AppCompatActivity() {
                 CaptureMode.SENSORS -> {}
             }
         } catch (e: Exception) {
-            status("start failed: $e"); abort(); return
+            val reason = if (e is IllegalStateException && e.message != null && e.cause == null) e.message!! else "start failed: $e"
+            android.util.Log.w("MainActivity", "start ${m.id}: $reason", e)
+            ar = null; cam2 = null
+            arRec?.let { previewHost.removeView(it.view); try { it.release() } catch (_: Exception) {} }
+            camRec?.let { previewHost.removeView(it.previewView); try { it.release() } catch (_: Exception) {} }
+            status(reason); abort(reason); return
         }
         @Suppress("DEPRECATION")
         wake = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "capture:rec").apply { acquire(3 * 3600 * 1000L) }
@@ -260,9 +283,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun abort() {
-        sensors?.stop(); sensors = null
-        writer?.finish { put("aborted", true) }; writer = null
+    /** The recorder did not start: close the session (flagged "aborted" with the reason) off the UI thread. */
+    private fun abort(reason: String) {
+        val sn = sensors; val w = writer
+        sensors = null; writer = null
+        // SensorRecorder.stop() and SessionWriter.finish() wait for their threads (2 s / 60 s): never on the UI thread.
+        Thread({
+            try { sn?.stop() } catch (e: Exception) { android.util.Log.w("MainActivity", "abort: sensors", e) }
+            try { w?.finish { put("aborted", true); put("abort_reason", reason) } } catch (e: Exception) { android.util.Log.e("MainActivity", "abort: finish", e) }
+        }, "abort-recording").start()
         if (!notResumed()) startPreview()
     }
 
@@ -280,8 +309,9 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try { r?.stop() } catch (e: Exception) { android.util.Log.e("MainActivity", "ar stop", e) }
             try { c?.stop() } catch (e: Exception) { android.util.Log.e("MainActivity", "cam2 stop", e) }
-            val sum = sn?.summary() ?: ""
+            // counts are final only once the sensor thread has drained (stop() waits for it)
             try { sn?.stop() } catch (_: Exception) {}
+            val sum = sn?.summary() ?: ""
             try { w.finish() } catch (e: Exception) { android.util.Log.e("MainActivity", "finish", e) }
             ui.post {
                 stopping = false
@@ -358,7 +388,7 @@ class MainActivity : AppCompatActivity() {
                         caps.filter { it in setOf("LOGICAL_MULTI_CAMERA", "DEPTH_OUTPUT", "RAW", "MANUAL_SENSOR") }.joinToString(",")
                 }.joinToString("\n")
                 status("wrote ${f.name}")
-                runOnUiThread { Ui.showText(this, "Cameras", "${f.absolutePath}\nconcurrent=${inv.optJSONArray("concurrent_camera_ids")}\n\n$lines") }
+                runOnUiThread { if (!isFinishing && !isDestroyed) Ui.showText(this, "Cameras", "${f.absolutePath}\nconcurrent=${inv.optJSONArray("concurrent_camera_ids")}\n\n$lines") }
             } catch (e: Exception) { status("camera dump failed: $e") }
         }
     }

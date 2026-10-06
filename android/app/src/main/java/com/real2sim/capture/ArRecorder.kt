@@ -222,6 +222,21 @@ class ArRecorder(
         view.onResume()
     }
 
+    /**
+     * Cleanup after create() or start() failed (CameraNotAvailableException, ...): nothing was recorded, so
+     * drop the encoder output and the blobs, and close the ARCore session so it releases the camera. Without
+     * this the idle preview could never reopen the camera until the process died.
+     */
+    fun release() {
+        recording = false
+        try { view.onPause() } catch (_: Exception) {}
+        try { encoder?.discard() } catch (_: Exception) {}
+        encoder = null
+        if (::depthBlob.isInitialized) listOf(depthBlob, confBlob, sdepthBlob, conf255Blob).forEach { try { it.close() } catch (_: Exception) {} }
+        fusion.close()
+        if (::session.isInitialized) { try { session.pause() } catch (_: Exception) {}; try { session.close() } catch (_: Exception) {} }
+    }
+
     fun stop() {
         recording = false
         view.queueEvent { }
@@ -231,6 +246,8 @@ class ArRecorder(
         session.pause()
         try { captureSession?.close() } catch (_: Exception) {}
         camera?.close()
+        // A still already in flight must not reach the listener once the reader is closed (IllegalStateException).
+        stillReader?.setOnImageAvailableListener(null, null)
         stillReader?.close()
         camThread?.quitSafely()
         encoder?.stop()
@@ -381,17 +398,27 @@ class ArRecorder(
         if (frameIdx % 10 == 0) pointCloud(frame, o)
         if (frameIdx % 90 == 0) dumpPlanes()
         if (opt.geospatial) geo(o)
-        poseByT[tNs] = Pair(T, JSONObject().put("K", K).put("w", kw).put("h", kh).put("track", track))
+        if (opt.hiResStills) {
+            // Only the stills need a pose per timestamp; a still shares the timestamp of a frame captured within
+            // the last period, so anything older than a few seconds can go (otherwise ~100 MB per hour).
+            poseByT[tNs] = Pair(T, JSONObject().put("K", K).put("w", kw).put("h", kh).put("track", track))
+            if (poseByT.size > 400) { val cut = tNs - 5_000_000_000L; poseByT.keys.removeAll { it < cut } }
+        }
 
         if (inVideo) {
-            // FORMAT.md frames.jsonl line (one per video sample, in video order)
+            // FORMAT.md frames.jsonl line (one per video sample, in video order). The sample is already in the
+            // video, so whatever happens here the index must advance and a line must be written, or every later
+            // "i" points at the wrong image.
             val line = JSONObject().apply {
                 put("i", videoIdx); put("t", tNs / 1e9); put("w", kw); put("h", kh); put("K", K); put("T", T); put("track", track)
-                o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { put("exp", it / 1e9) }
-                if (o.has("iso")) put("iso", o.getInt("iso"))
-                o.optJSONObject("light")?.let { l -> put("amb", l.getJSONArray("main_intensity").let { (it.getDouble(0) + it.getDouble(1) + it.getDouble(2)) / 3 }) }
                 put("d", JSONObject.NULL); put("c", JSONObject.NULL)
             }
+            try {
+                o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { line.put("exp", it / 1e9) }
+                if (o.has("iso")) line.put("iso", o.getInt("iso"))
+                // ARCore HDR main-light intensity (linear, unitless), averaged over RGB; not the ARKit lumens of FORMAT.md
+                o.optJSONObject("light")?.let { l -> JsonSafe.put(line, "amb", l.getJSONArray("main_intensity").let { (it.getDouble(0) + it.getDouble(1) + it.getDouble(2)) / 3 }) }
+            } catch (e: Exception) { Log.w(TAG, "frame line extras", e) }
             o.put("i", videoIdx)
             pending.addLast(Pair(tNs, line))
             videoIdx++
@@ -628,7 +655,8 @@ class ArRecorder(
         val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3)
         stillReader = reader
         reader.setOnImageAvailableListener({ r ->
-            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            if (!recording) return@setOnImageAvailableListener
+            val img = try { r.acquireLatestImage() } catch (e: IllegalStateException) { null } ?: return@setOnImageAvailableListener
             val ts = img.timestamp
             val nv21 = yuvToNv21(img)
             val w = img.width; val h = img.height

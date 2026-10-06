@@ -23,6 +23,20 @@ which produces **ARKitScenes** raw layout and **LiteReality** scan folders. Andr
 > 1 new frame every 4 s under software GL), so real tracking, depth, SharedCamera stills, ToF and
 > multi-lens streaming can only be confirmed on the phone. Treat the first capture as a smoke test,
 > and send back `session.json` plus the "Dump cams" output.
+>
+> **Review 2026-10-06 (new UI, PR #7 build).** Driven end to end on an API 34 x86_64 emulator (KVM,
+> SwiftShader): main screen in all three modes, Sessions, the Viewer's five tabs, Nav with its settings
+> sheet and the main Settings sheet, plus rotation of Sessions. No crash, ANR or `crash_logs/` entry.
+> Mode B and mode C record and play back; mode A cannot start on the emulator because `Session()` itself
+> throws `FatalException` with the ARCore 1.56 emulator build (the app falls back to a Camera2 preview and
+> the session is flagged *aborted*). A code review on top found and fixed: ARCore session / MediaCodec /
+> camera leaks when a recording fails to start (the camera then stayed busy until the process died),
+> two `RejectedExecutionException` crashes (depth-fusion worker, Sessions delete + Done), a
+> `ConcurrentModificationException` in the stop summary, `frames.jsonl` / `video.mp4` index drift when a
+> frame's light estimate is NaN, unbounded `poseByT` growth (~100 MB/h), a hi-res-still listener
+> firing on a closed reader, the all-files-access screen covering the permission dialog on every launch,
+> mode C demanding the camera permission, Nav's "Starting ARCore…" shown forever without ARCore, and
+> three Nav settings that were never saved.
 
 ---
 
