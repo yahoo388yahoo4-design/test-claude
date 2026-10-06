@@ -812,7 +812,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             frame.acquireDepthImage16Bits().use { d ->
                 if (d.timestamp != lastDepthTs) {
                     lastDepthTs = d.timestamp
-                    val k = cam.imageIntrinsics
+                    val k = cam.textureIntrinsics     // ARCore depth covers the camera texture's FOV; DepthFusion scales to the depth size
                     val p = d.planes[0]
                     val mm = DepthFilter.shortsLE(SessionWriter.packPlane(p.buffer, d.width, d.height, p.rowStride, 2, p.pixelStride.coerceAtLeast(2)), d.width * d.height)
                     fusion.submit(DepthFusion.Frame(null, null, 0, 0, mm, d.width, d.height,

@@ -79,14 +79,23 @@ class MainActivity : AppCompatActivity() {
             if (writer != null) { status("stop recording first"); return@setOnClickListener }
             startActivity(android.content.Intent(this, SessionsActivity::class.java))
         }
-        requestPerms()
-        if (Build.VERSION.SDK_INT >= 30 && !SessionWriter.allFilesAccess()) {
-            // Optional: lets sessions go to /sdcard/Real2SimCapture where adb pull always works.
-            try {
-                startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    android.net.Uri.parse("package:$packageName")))
-            } catch (_: Exception) {}
-        }
+        // The optional All-files-access page comes after the runtime permission dialog (or now, if none is needed).
+        if (!requestPerms()) maybeAskAllFilesAccess()
+    }
+
+    /** Once per install: offers the system "All files access" page (sessions in /sdcard/Real2SimCapture, where adb pull always works). */
+    private fun maybeAskAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < 30 || SessionWriter.allFilesAccess() || settings.askedAllFiles) return
+        settings.askedAllFiles = true
+        openAllFilesAccess()
+    }
+
+    private fun openAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < 30) return
+        try {
+            startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                android.net.Uri.parse("package:$packageName")))
+        } catch (_: Exception) {}
     }
 
     /** Live camera while idle (like iOS); the recorders get the camera only after it is released. */
@@ -105,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (writer == null && !notResumed()) startPreview()
+        maybeAskAllFilesAccess()
     }
 
     private fun notResumed() = !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
@@ -151,6 +161,8 @@ class MainActivity : AppCompatActivity() {
             section(null) {
                 value("Sessions", root.name)
                 note(root.absolutePath)
+                if (Build.VERSION.SDK_INT >= 30 && !SessionWriter.allFilesAccess())
+                    button("Allow all files access (sessions in /sdcard)") { openAllFilesAccess() }
             }
         }.show()
     }
@@ -185,10 +197,12 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private fun requestPerms() {
+    /** Requests the missing runtime permissions; true when the system dialog was shown. */
+    private fun requestPerms(): Boolean {
         val perms = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.RECORD_AUDIO)
         val missing = perms.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), 1)
+        return missing.isNotEmpty()
     }
 
     private fun status(s: String) = runOnUiThread { statusView.text = s }
@@ -206,23 +220,34 @@ class MainActivity : AppCompatActivity() {
         val w = SessionWriter(this, m.id)
         writer = w
         sensors = SensorRecorder(this, w).also { it.start(recordAudio = s.recordAudio) }
+        // The recorder being started, visible to the catch below so a failure anywhere releases it (view, camera, encoder).
+        var arr: ArRecorder? = null
+        var c2: Camera2Recorder? = null
         try {
             when (m) {
                 CaptureMode.RGBD -> {
                     val r = ArRecorder(this, w, ArOptions(hiResStills = s.hiResStills, arcoreMp4 = s.arcoreMp4,
                         lockFocus = s.lock, geospatial = s.geospatial), ::status)
-                    r.create()?.let { err -> status(err); abort(); return }
+                    arr = r
+                    r.create()?.let { err -> r.release(); status(err); abort(); return }
                     previewHost.addView(r.view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-                    r.start()
+                    try { r.start() } catch (e: Exception) {
+                        previewHost.removeView(r.view); r.release()
+                        status("AR start failed: $e"); abort(); return
+                    }
                     ar = r
                     addLiveViews(r)
                 }
                 CaptureMode.MULTICAM -> {
                     val r = Camera2Recorder(this, w, Camera2Options(rawDng = s.rawDng, lock = s.lock, oisOff = s.oisOff), ::status)
+                    c2 = r
                     // live preview behind the coverage overlay (its surface must exist before the session is configured)
                     previewHost.addView(r.previewView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, android.view.Gravity.CENTER))
                     val err = try { r.start() } catch (e: Exception) { "camera start failed: $e" }
-                    if (err != null) { previewHost.removeView(r.previewView); status(err); abort(); return }
+                    if (err != null) {
+                        previewHost.removeView(r.previewView); try { r.stop() } catch (_: Exception) {}
+                        status(err); abort(); return
+                    }
                     cam2 = r
                     val cv = CoverageView(this)
                     previewHost.addView(cv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
@@ -234,6 +259,12 @@ class MainActivity : AppCompatActivity() {
                 CaptureMode.SENSORS -> {}
             }
         } catch (e: Exception) {
+            // Whatever was set up so far must not stay alive on top of the idle preview.
+            ui.removeCallbacks(liveTick)
+            mapView?.let { previewHost.removeView(it) }; mapView = null
+            coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
+            arr?.let { ar = null; previewHost.removeView(it.view); try { it.release() } catch (_: Exception) {} }
+            c2?.let { cam2 = null; previewHost.removeView(it.previewView); try { it.stop() } catch (_: Exception) {} }
             status("start failed: $e"); abort(); return
         }
         @Suppress("DEPRECATION")
@@ -358,7 +389,7 @@ class MainActivity : AppCompatActivity() {
                         caps.filter { it in setOf("LOGICAL_MULTI_CAMERA", "DEPTH_OUTPUT", "RAW", "MANUAL_SENSOR") }.joinToString(",")
                 }.joinToString("\n")
                 status("wrote ${f.name}")
-                runOnUiThread { Ui.showText(this, "Cameras", "${f.absolutePath}\nconcurrent=${inv.optJSONArray("concurrent_camera_ids")}\n\n$lines") }
+                runOnUiThread { if (!isFinishing && !isDestroyed) Ui.showText(this, "Cameras", "${f.absolutePath}\nconcurrent=${inv.optJSONArray("concurrent_camera_ids")}\n\n$lines") }
             } catch (e: Exception) { status("camera dump failed: $e") }
         }
     }

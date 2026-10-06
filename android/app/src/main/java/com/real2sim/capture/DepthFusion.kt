@@ -36,8 +36,9 @@ class DepthFusion(
 ) {
     /**
      * One depth sample. [raw] / [smooth] DEPTH16 (either may be null) with their sizes; [conf] raw confidence
-     * 0..255. Intrinsics [k] = fx, fy, cx, cy of the CPU image of size [kw] x [kh] (scaled to each depth map
-     * here). [pose] column-major camera-to-world. [rgb] optional 0xRRGGBB at [rgbW] x [rgbH].
+     * 0..255. Intrinsics [k] = fx, fy, cx, cy of an image of size [kw] x [kh] that shares the depth maps' field
+     * of view (ARCore: the camera texture, cam.textureIntrinsics), scaled to each depth map here. [pose]
+     * column-major camera-to-world. [rgb] optional 0xRRGGBB at [rgbW] x [rgbH], aligned with the depth map.
      */
     class Frame(
         val raw: ShortArray?, val conf: ByteArray?, val rawW: Int, val rawH: Int,
@@ -84,7 +85,13 @@ class DepthFusion(
         if (closed) return
         submitted++
         if (slot.getAndSet(f) != null) dropped++
-        if (scheduled.compareAndSet(false, true)) exec.execute(::drain)
+        if (scheduled.compareAndSet(false, true)) schedule()
+    }
+
+    /** Queues a drain; a [close] racing with it just drops the frame in the slot instead of throwing on the caller. */
+    private fun schedule() {
+        try { exec.execute(::drain) }
+        catch (_: java.util.concurrent.RejectedExecutionException) { scheduled.set(false); slot.set(null) }
     }
 
     private fun drain() {
@@ -92,7 +99,7 @@ class DepthFusion(
             while (true) { val f = slot.getAndSet(null) ?: break; try { process(f) } catch (e: Exception) { lastError = e.toString() } }
         } finally {
             scheduled.set(false)
-            if (slot.get() != null && !closed && scheduled.compareAndSet(false, true)) exec.execute(::drain)
+            if (slot.get() != null && !closed && scheduled.compareAndSet(false, true)) schedule()
         }
     }
 
@@ -184,7 +191,7 @@ class DepthFusion(
         return try { fut.get(timeoutMs, TimeUnit.MILLISECONDS) } catch (e: Exception) { lastError = e.toString(); null } finally { close() }
     }
 
-    fun close() { closed = true; exec.shutdown() }
+    fun close() { closed = true; slot.set(null); exec.shutdown() }
 
     /** Final mesh: marching cubes, small components removed, segmentation, cleaned points. */
     fun buildResult(floorY: Float = Float.NaN): Result {

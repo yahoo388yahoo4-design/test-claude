@@ -28,6 +28,8 @@ class CaptureSettings(private val prefs: SharedPreferences) {
     var hiResStills by flag("hires_stills", false)
     var oisOff by flag("ois_off", false)
     var geospatial by flag("geospatial", false)
+    /** The system "All files access" page was offered once (it stays reachable from the Settings sheet). */
+    var askedAllFiles by flag("asked_all_files", false)
     var uploadUrl: String
         get() = prefs.getString("upload_url", "") ?: ""
         set(v) = prefs.edit { putString("upload_url", v.trim()) }
