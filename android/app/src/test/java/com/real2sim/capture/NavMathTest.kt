@@ -113,6 +113,28 @@ class NavMathTest {
         assertTrue(arrived.arrived)
     }
 
+    /**
+     * NavActivity's closed-loop move: the task stores the phone pose at the start and its progress must be
+     * measured with the phone pose too. Measuring from the robot's turning centre (phone minus mountForward
+     * along the heading) would begin at -mountForward and finish the move mountForward late (or, for a
+     * short move, report it done before the robot moved).
+     */
+    @Test fun closedLoopMoveProgressUsesTheSamePointAsItsStart() {
+        fun travelled(px: Float, pz: Float, sx: Float, sz: Float, h: Float) = (px - sx) * cos(h) + (pz - sz) * sin(h)
+        val h = 0.7f; val mountForward = 0.15f; val dist = 0.10f
+        val sx = 1.0f; val sz = -2.0f                         // phone pose at the start (what Task.Move records)
+        // phone after driving `dist` along the heading
+        val px = sx + dist * cos(h); val pz = sz + dist * sin(h)
+        assertEquals(dist, travelled(px, pz, sx, sz, h), 1e-6f)
+        assertEquals(0f, travelled(sx, sz, sx, sz, h), 0f)   // nothing travelled yet: the move must not finish on its first frame
+        // robot centre against the phone start: off by mountForward from the first frame on
+        val rx0 = sx - mountForward * cos(h); val rz0 = sz - mountForward * sin(h)
+        assertEquals(-mountForward, travelled(rx0, rz0, sx, sz, h), 1e-6f)
+        assertTrue("10 cm move would look done (|travelled| >= dist) before the robot moved", abs(travelled(rx0, rz0, sx, sz, h)) >= dist)
+        val rx1 = px - mountForward * cos(h); val rz1 = pz - mountForward * sin(h)
+        assertEquals(dist - mountForward, travelled(rx1, rz1, sx, sz, h), 1e-6f)
+    }
+
     @Test fun unreachableGoalReturnsNull() {
         val map = MapBuilder(); map.addPose(0f, 0f, 0f, 0L)
         // closed ring of walls around the robot

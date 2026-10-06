@@ -250,7 +250,7 @@ class RobotCore(
  * opens it (115200 8N1) and runs a [RobotCore] on it.
  */
 class UsbRobot(private val ctx: Context, private val kind: UsbRobotKind, private val incoming: (String) -> Unit,
-               private val onState: (String) -> Unit) : RobotTransport {
+               private val onState: (String) -> Unit, private val onDead: () -> Unit = {}) : RobotTransport {
     private val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
     private var port: UsbSerialPort? = null
     private var io: SerialInputOutputManager? = null

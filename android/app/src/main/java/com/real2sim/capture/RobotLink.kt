@@ -97,6 +97,10 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
     @Volatile var statusRxMs = 0L; private set
     @Volatile var sent = 0; private set
     @Volatile var received = 0; private set
+    /** seq of the open-loop move / turn the robot is executing (0 = none); cleared by its done/error, stop, estop, disconnect. */
+    @Volatile var pendingSeq = 0; private set
+    /** True while a move / turn sent to the robot has not reported done, or the robot reports itself busy. */
+    val motionPending: Boolean get() = pendingSeq != 0 || busy
 
     /** Called for every message from the robot (any thread). */
     var onMessage: ((JSONObject) -> Unit)? = null
@@ -151,7 +155,8 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
         if (kind != Kind.NONE) startPing()
     }
 
-    private fun startPing() {
+    @Synchronized private fun startPing() {
+        if (pingTicker != null) return
         pingTicker = Thread {
             try {
                 while (true) {
@@ -162,8 +167,10 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
         }.apply { isDaemon = true; start() }
     }
 
+    @Synchronized private fun stopPing() { pingTicker?.interrupt(); pingTicker = null }
+
     fun disconnect() {
-        pingTicker?.interrupt(); pingTicker = null
+        stopPing()
         if (connected) sendRaw(RobotProtocol.stop(nextSeq()))
         ws?.close(1000, "bye"); ws = null
         ble?.stop(); ble = null
@@ -172,7 +179,12 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
         setState("robot: off", false)
     }
 
-    private fun setState(s: String, ok: Boolean) { stateText = s; connected = ok; onEvent(s) }
+    private fun setState(s: String, ok: Boolean) {
+        stateText = s; connected = ok
+        if (!ok) { pendingSeq = 0; busy = false; stopPing() }   // a lost link (USB unplug, BLE drop, Wi-Fi failure) has no robot to ping
+        else startPing()
+        onEvent(s)
+    }
 
     /** Sends only while the robot is connected. */
     fun send(o: JSONObject): Boolean = connected && sendRaw(o)
@@ -190,10 +202,19 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
     }
 
     fun vel(v: Float, w: Float) = send(RobotProtocol.vel(v.toDouble(), w.toDouble(), nextSeq()))
-    fun stop() = send(RobotProtocol.stop(nextSeq()))
-    fun move(cm: Float, speedCms: Float) = send(RobotProtocol.move(cm.toDouble(), speedCms.toDouble(), nextSeq()))
-    fun turn(deg: Float, speedDps: Float) = send(RobotProtocol.turn(deg.toDouble(), speedDps.toDouble(), nextSeq()))
-    fun estop(on: Boolean) { if (on) stop(); send(RobotProtocol.estop(on)) }
+    fun stop(): Boolean { pendingSeq = 0; return send(RobotProtocol.stop(nextSeq())) }
+    fun move(cm: Float, speedCms: Float) = motion(RobotProtocol.move(cm.toDouble(), speedCms.toDouble(), nextSeq()))
+    fun turn(deg: Float, speedDps: Float) = motion(RobotProtocol.turn(deg.toDouble(), speedDps.toDouble(), nextSeq()))
+    fun estop(on: Boolean) { pendingSeq = 0; if (on) stop(); send(RobotProtocol.estop(on)) }
+
+    /** Sends a move / turn and remembers its seq until the robot answers done / error for it. */
+    private fun motion(o: JSONObject): Boolean {
+        val s = o.getInt("seq")
+        pendingSeq = s
+        val ok = send(o)
+        if (!ok && pendingSeq == s) pendingSeq = 0
+        return ok
+    }
 
     private fun handle(text: String) {
         val m = try { JSONObject(text) } catch (_: Exception) { return }
@@ -215,9 +236,9 @@ class RobotLink(private val ctx: Context, private val onEvent: (String) -> Unit)
                 busy = m.optBoolean("busy"); robotEstop = m.optBoolean("estop")
                 statusRxMs = SystemClock.elapsedRealtime()
             }
-            "estop" -> { robotEstop = true; onEvent("robot: emergency stop") }
-            "done" -> onEvent("robot: done #${m.optInt("seq")}")
-            "error" -> onEvent("robot error: ${m.optString("error")}")
+            "estop" -> { robotEstop = true; pendingSeq = 0; onEvent("robot: emergency stop") }
+            "done" -> { if (m.optInt("seq") == pendingSeq) pendingSeq = 0; onEvent("robot: done #${m.optInt("seq")}") }
+            "error" -> { if (m.has("seq") && m.optInt("seq") == pendingSeq) pendingSeq = 0; onEvent("robot error: ${m.optString("error")}") }
         }
         onMessage?.invoke(m)
     }
@@ -254,8 +275,8 @@ class BleUart(
     }
 
     private val adapter = (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-    private var gatt: BluetoothGatt? = null
-    private var rx: BluetoothGattCharacteristic? = null
+    @Volatile private var gatt: BluetoothGatt? = null
+    @Volatile private var rx: BluetoothGattCharacteristic? = null
     private var mtu = 23
     private val splitter = RobotProtocol.LineSplitter()
     private val writeQueue = ArrayDeque<ByteArray>()
@@ -264,9 +285,10 @@ class BleUart(
 
     private val scanCb = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            if (stopped || gatt != null) return      // results still queued after stopScan: connect once only
             val name = result.device.name ?: result.scanRecord?.deviceName ?: ""
             if (namePrefix.isNotEmpty() && !name.startsWith(namePrefix)) return
-            adapter?.bluetoothLeScanner?.stopScan(this)
+            try { adapter?.bluetoothLeScanner?.stopScan(this) } catch (_: Exception) {}
             onState("BLE connecting $name", false)
             connectTo(result.device)
         }
@@ -291,36 +313,63 @@ class BleUart(
         gatt = null; rx = null
     }
 
+    /** A callback from a client that is no longer ours (stopped, or replaced by a newer connectGatt) is dropped. */
+    private fun stale(g: BluetoothGatt): Boolean {
+        if (stopped) return true
+        val cur = gatt ?: return false
+        if (cur === g) return false
+        try { g.close() } catch (_: Exception) {}
+        return true
+    }
+
     private fun connectTo(d: BluetoothDevice) {
+        if (stopped) return
+        gatt?.let { old -> try { old.disconnect(); old.close() } catch (_: Exception) {} }
+        rx = null
         gatt = d.connectGatt(ctx, false, object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                if (stale(g)) return
                 if (newState == BluetoothProfile.STATE_CONNECTED) { g.requestMtu(247) }
-                else if (newState == BluetoothProfile.STATE_DISCONNECTED && !stopped) {
+                else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     rx = null; onState("BLE reconnecting", false); g.connect()
                 }
             }
-            override fun onMtuChanged(g: BluetoothGatt, m: Int, status: Int) { mtu = m; g.discoverServices() }
+            override fun onMtuChanged(g: BluetoothGatt, m: Int, status: Int) { if (stale(g)) return; mtu = m; g.discoverServices() }
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                if (stale(g)) return
                 val s = g.getService(SERVICE) ?: run { onState("BLE: no UART service", false); return }
                 rx = s.getCharacteristic(RX)
+                // Enable TX notifications. Only one GATT operation may be in flight, so the link is reported connected
+                // (which makes RobotLink send hello) from onDescriptorWrite, not while the CCCD write is still pending.
+                var pendingCccd = false
                 s.getCharacteristic(TX)?.let { tx ->
                     g.setCharacteristicNotification(tx, true)
                     tx.getDescriptor(CCCD)?.let { desc ->
-                        if (Build.VERSION.SDK_INT >= 33) g.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                        else @Suppress("DEPRECATION") { desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; g.writeDescriptor(desc) }
+                        pendingCccd = try {
+                            if (Build.VERSION.SDK_INT >= 33)
+                                g.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == android.bluetooth.BluetoothStatusCodes.SUCCESS
+                            else @Suppress("DEPRECATION") { desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; g.writeDescriptor(desc) }
+                        } catch (_: Exception) { false }
                     }
                 }
-                if (rx != null) onState("BLE ${d.name ?: "robot"}", true)
+                if (rx != null && !pendingCccd) onState("BLE ${d.name ?: "robot"}", true)
             }
-            override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) { pump() }
+            override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                if (stale(g)) return
+                if (rx != null) onState("BLE ${d.name ?: "robot"}", true)   // RobotLink sends hello now
+                pump()
+            }
             @Deprecated("API < 33")
             override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
+                if (stale(g)) return
                 @Suppress("DEPRECATION") c.value?.let { v -> splitter.feed(v).forEach(onLine) }
             }
             override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
+                if (stale(g)) return
                 splitter.feed(value).forEach(onLine)
             }
             override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
+                if (stale(g)) return
                 synchronized(writeQueue) { writing = false }
                 pump()
             }
@@ -350,6 +399,7 @@ class BleUart(
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         val ok = if (Build.VERSION.SDK_INT >= 33) g.writeCharacteristic(c, next, type) == android.bluetooth.BluetoothStatusCodes.SUCCESS
         else @Suppress("DEPRECATION") run { c.writeType = type; c.value = next; g.writeCharacteristic(c) }
-        if (!ok) synchronized(writeQueue) { writing = false }
+        // refused (another GATT operation in flight): keep the chunk; the next descriptor / characteristic callback retries it
+        if (!ok) synchronized(writeQueue) { writeQueue.addFirst(next); writing = false }
     }
 }
