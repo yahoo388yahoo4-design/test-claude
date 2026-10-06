@@ -64,7 +64,7 @@ object IntentParser {
     val stopWords = setOf("stop", "halt", "freeze", "emergency", "abort", "whoa")
 
     /** Checked on every partial transcript, so the robot stops before the sentence ends. */
-    fun containsStop(text: String) = words(text).any { it in stopWords }
+    fun containsStop(text: String) = words(normalise(text)).any { it in stopWords }
 
     fun parse(text: String, labels: List<String> = emptyList()): List<VoiceAction>? {
         val t = normalise(text)

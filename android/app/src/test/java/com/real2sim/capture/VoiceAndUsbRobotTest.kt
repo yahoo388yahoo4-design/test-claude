@@ -30,6 +30,10 @@ class VoiceAndUsbRobotTest {
         assertEquals(listOf(VoiceAction.Stop), p("hey robot, freeze"))
         assertEquals(listOf(VoiceAction.Stop), p("go to the table and stop"))
         assertFalse(IntentParser.containsStop("please go to the st"))
+        // Whisper transcripts carry sentence punctuation: still an emergency stop, never an LLM round trip.
+        assertTrue(IntentParser.containsStop("Stop."))
+        assertTrue(IntentParser.containsStop("Robot, stop!"))
+        assertFalse(IntentParser.containsStop("go forward 1.5 meters"))
         assertEquals(listOf(VoiceAction.Move(1.5)), p("move forward 1.5 meters"))
         assertEquals(listOf(VoiceAction.Move(0.5)), p("go forward fifty centimeters"))
         assertEquals(listOf(VoiceAction.Move(-0.2)), p("go back a little"))
@@ -126,5 +130,26 @@ class VoiceAndUsbRobotTest {
         val neato = RobotCore(UsbRobotKind.NEATO, { wrote.add(it) }, { out.add(it) })
         neato.handleNow("""{"type":"vel","v":0.1,"w":0.0,"seq":1}""")
         assertEquals("setmotor 100 100 100\n", wrote.last())
+    }
+
+    @Test fun neatoTimedMoveRefreshesSetMotor() {
+        // A Neato setmotor only covers 1 s of travel, so a 5 s move (100 cm at 20 cm/s) must re-send it.
+        val wrote = Collections.synchronizedList(ArrayList<String>())
+        val out = Collections.synchronizedList(ArrayList<JSONObject>())
+        val neato = RobotCore(UsbRobotKind.NEATO, { wrote.add(it) }, { out.add(it) })
+        neato.handleNow("""{"type":"move","dist_cm":100,"speed_cms":20,"seq":7}""")
+        Thread.sleep(650)
+        val repeats = synchronized(wrote) { wrote.count { it == "setmotor 200 200 200\n" } }
+        assertTrue("expected repeated setmotor writes, got $repeats", repeats >= 4)
+        assertTrue(neato.status().getBoolean("busy"))
+        assertTrue(out.none { it.optString("type") == "done" })
+        neato.handleNow("""{"type":"stop","seq":8}""")
+        Thread.sleep(50)
+        val mark = wrote.size
+        Thread.sleep(300)
+        assertEquals("setmotor 0 0 0\n", wrote[mark - 1])
+        assertEquals(mark, wrote.size)   // the refresh ticker is cancelled with the job
+        assertFalse(neato.status().getBoolean("busy"))
+        neato.close()
     }
 }
