@@ -105,8 +105,10 @@ class R2SEpisode(Episode):
 
     def conf(self, i):
         d = self._lines[i]
-        if self.use_smoothed and d.get("sc"):
-            return self._decode(self._sconf, d["sc"], np.uint8, d)
+        if self.use_smoothed and d.get("sd"):
+            # confidence of the smoothed map `depth(i)` returns, or None when the recorder wrote none
+            # (Android writes no "sc"); never the raw map's confidence
+            return self._decode(self._sconf, d.get("sc"), np.uint8, d)
         return self._decode(self._conf, d.get("c"), np.uint8, d)
 
     def mesh(self):

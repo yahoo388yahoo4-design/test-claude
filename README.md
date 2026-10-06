@@ -170,7 +170,7 @@ python tools/thirdparty_test.py ARKITSCENES_EPISODE --work /tmp/tp  # Stray / 3D
 ```
 
 Inputs are auto-detected by the reader registry in `tools/readers/__init__.py` (`r2s`, `strayscanner`,
-`3dscannerapp`, `arkitscenes`; an Android reader can register itself with one line). Conversions:
+`3dscannerapp`, `arkitscenes`, `android` from `tools/readers/android_reader.py`). Conversions:
 
 * **Poses:** ARKit camera-to-world (y-up world, camera looks down −z) → ARKitScenes world-to-camera in a
   z-up world with an OpenCV camera: `p_zup = Rx(+90°)·p`, `R_cv = R_arkit·diag(1, −1, −1)`, then inverted
