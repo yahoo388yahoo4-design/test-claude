@@ -20,6 +20,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.ProbeTable
 import com.hoho.android.usbserial.driver.UsbSerialDriver
@@ -128,6 +129,7 @@ class RobotCore(
     private val ex = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "usb-robot").apply { isDaemon = true } }
     private var velExpires = 0L
     private var job: ScheduledFuture<*>? = null
+    private var refresh: ScheduledFuture<*>? = null
     private var v = 0.0; private var w = 0.0; private var left = 0.0; private var right = 0.0
     @Volatile var estop = false; private set
     val info = HashMap<String, Any>()
@@ -143,6 +145,7 @@ class RobotCore(
 
     fun close() {
         ex.execute {
+            cancelJob()                 // a pending move/turn completion must not fire after the port is gone
             drive(0.0, 0.0)
             if (kind == UsbRobotKind.NEATO) write("testmode off\n")
         }
@@ -205,11 +208,15 @@ class RobotCore(
 
     private fun timed(v: Double, w: Double, seconds: Double, seq: Any?) {
         drive(v, w)
-        job = ex.schedule({ drive(0.0, 0.0); job = null; emit(JSONObject().put("type", "done").put("seq", seq)) },
+        // A Neato setmotor only covers 1 s of travel: keep re-sending it while the job runs.
+        if (kind == UsbRobotKind.NEATO) refresh = ex.scheduleWithFixedDelay({ drive(v, w) }, 100, 100, TimeUnit.MILLISECONDS)
+        job = ex.schedule({ cancelRefresh(); drive(0.0, 0.0); job = null; emit(JSONObject().put("type", "done").put("seq", seq)) },
             (seconds * 1000).toLong().coerceAtLeast(0), TimeUnit.MILLISECONDS)
     }
 
-    private fun cancelJob() { job?.cancel(false); job = null }
+    private fun cancelRefresh() { refresh?.cancel(false); refresh = null }
+
+    private fun cancelJob() { cancelRefresh(); job?.cancel(false); job = null }
 
     private fun watchdog() {
         if (job == null && velExpires != 0L && System.nanoTime() > velExpires) { velExpires = 0; drive(0.0, 0.0) }
@@ -250,14 +257,16 @@ class RobotCore(
  * opens it (115200 8N1) and runs a [RobotCore] on it.
  */
 class UsbRobot(private val ctx: Context, private val kind: UsbRobotKind, private val incoming: (String) -> Unit,
-               private val onState: (String) -> Unit) : RobotTransport {
+               private val onState: (String) -> Unit, private val onDead: () -> Unit = {}) : RobotTransport {
     private val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
     private var port: UsbSerialPort? = null
     private var io: SerialInputOutputManager? = null
-    private var core: RobotCore? = null
+    /** Published (under the `pending` lock) only once the robot has booted and the core has started. */
+    @Volatile private var core: RobotCore? = null
     private val pending = ArrayList<String>()
     private val lineBuf = StringBuilder()
     private var receiver: BroadcastReceiver? = null
+    private var detachReceiver: BroadcastReceiver? = null
     @Volatile private var closed = false
 
     companion object {
@@ -315,26 +324,48 @@ class UsbRobot(private val ctx: Context, private val kind: UsbRobotKind, private
             try { p.dtr = true; p.rts = true } catch (_: Exception) {}
             port = p
             val c = RobotCore(kind, ::writeSerial, { incoming(it.toString()) })
-            core = c
             val m = SerialInputOutputManager(p, object : SerialInputOutputManager.Listener {
                 override fun onNewData(data: ByteArray) = onSerial(data)
-                override fun onRunError(e: Exception) { if (!closed) onState("USB: ${e.message ?: "disconnected"}") }
+                override fun onRunError(e: Exception) = lost("USB: ${e.message ?: "disconnected"}")
             })
             io = m
             m.start()
+            val dr = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    if (i.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
+                    val dev = IntentCompat.getParcelableExtra(i, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    if (dev == d.device) lost("USB: ${kind.title} unplugged")
+                }
+            }
+            detachReceiver = dr
+            ContextCompat.registerReceiver(ctx, dr, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED), ContextCompat.RECEIVER_EXPORTED)
             onState("USB: ${kind.title} on ${describe(d.device)}")
-            // OpenBot boards reset when the port opens; give the bootloader a moment.
+            // OpenBot boards reset when the port opens; give the bootloader a moment. Until the core has started
+            // (Neato: "testmode on" is queued first) nothing is dispatched: send() buffers into `pending`.
             val delay = if (kind == UsbRobotKind.OPENBOT) 2000L else 100L
             Thread {
                 try { Thread.sleep(delay) } catch (_: InterruptedException) {}
-                if (closed) return@Thread
-                c.start()
-                synchronized(pending) { pending.forEach(c::handle); pending.clear() }
+                synchronized(pending) {
+                    if (closed) { c.close(); return@Thread }
+                    c.start()
+                    pending.forEach(c::handle); pending.clear()
+                    core = c
+                }
             }.apply { isDaemon = true }.start()
         } catch (e: Exception) {
             onState("USB: ${e.message}")
             close()
         }
+    }
+
+    /** The port died (I/O error, or the cable was pulled): shut everything down and tell the link. */
+    private fun lost(msg: String) {
+        synchronized(this) {
+            if (closed) return
+            onState(msg)
+            close()
+        }
+        onDead()
     }
 
     private fun onSerial(data: ByteArray) {
@@ -353,17 +384,22 @@ class UsbRobot(private val ctx: Context, private val kind: UsbRobotKind, private
     }
 
     override fun send(json: String): Boolean {
-        val c = core
-        if (c == null) { synchronized(pending) { if (pending.size < 20) pending.add(json) }; return true }
-        c.handle(json)
+        if (closed) return false
+        synchronized(pending) {
+            val c = core
+            if (c == null) { if (pending.size < 20) pending.add(json); return true }
+            c.handle(json)
+        }
         return true
     }
 
     override fun close() {
-        closed = true
+        val c = synchronized(pending) { closed = true; core.also { core = null } }
         receiver?.let { try { ctx.unregisterReceiver(it) } catch (_: Exception) {} }
         receiver = null
-        core?.close(); core = null
+        detachReceiver?.let { try { ctx.unregisterReceiver(it) } catch (_: Exception) {} }
+        detachReceiver = null
+        c?.close()
         io?.stop(); io = null
         try { port?.close() } catch (_: Exception) {}
         port = null

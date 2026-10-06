@@ -3,7 +3,10 @@
 ARCore depth on phones without a depth sensor (~160x120) smears depth across object silhouettes ("flying
 pixels") and has speckle. `filter_depth` removes, in order:
 
-  1. low confidence (ARCore levels 0..2 from conf.zlib.bin, or 0..255) and out-of-range depth;
+  1. low confidence and out-of-range depth. The app gates on ARCore's 0..255 confidence with
+     `(minConfidence * 255).toInt()` = 127 for the default 0.5 (pixels < 127 dropped), so pass the 0..255 map
+     (extras/conf255.zlib.bin) with `conf_levels=False` and `min_conf255=int(min_confidence * 255)` to mirror it
+     exactly; the 0..2 levels of conf.zlib.bin (level 1 = raw 85..169) can only approximate that boundary;
   2. isolated pixels (fewer than `min_neighbours` same-surface 3x3 neighbours) and replaces the rest by the
      edge-preserving median of their same-surface neighbours (relative difference < 2 * rel_jump);
   3. flying pixels: depth jumps by more than `rel_jump` both towards a nearer and a farther neighbour;
@@ -17,7 +20,7 @@ import warnings
 
 import numpy as np
 
-DEFAULTS = dict(min_conf_level=1, min_conf255=128, min_m=0.2, max_m=4.0, rel_jump=0.06,
+DEFAULTS = dict(min_conf_level=1, min_conf255=127, min_m=0.2, max_m=4.0, rel_jump=0.06,
                 max_grazing_deg=80.0, min_neighbours=3)
 
 
@@ -30,7 +33,7 @@ def _shifts(a: np.ndarray):
 
 
 def filter_depth(depth_mm: np.ndarray, conf: np.ndarray | None = None, K: np.ndarray | None = None, *,
-                 conf_levels: bool = True, min_conf_level: int = 1, min_conf255: int = 128,
+                 conf_levels: bool = True, min_conf_level: int = 1, min_conf255: int = 127,
                  min_m: float = 0.2, max_m: float = 4.0, rel_jump: float = 0.06,
                  max_grazing_deg: float = 80.0, min_neighbours: int = 3, median: bool = True) -> np.ndarray:
     """Cleaned copy of `depth_mm` (uint16 mm). `K` is the 3x3 intrinsics at the depth resolution."""

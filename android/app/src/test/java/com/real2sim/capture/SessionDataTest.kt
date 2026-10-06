@@ -262,9 +262,14 @@ class SessionDataTest {
             val c = File(root, "20251231_235959_arcore_rgbd").apply { mkdirs() }   // crashed: no session.json
             File(c, "frames.jsonl").writeText("{}\n{}\n\n{}\n")
             File(root, "camera_inventory.json").writeText("{}")                   // files are not sessions
+            val d = File(root, "20251231_120000_arcore_rgbd").apply { mkdirs() }   // recorder never started
+            File(d, "session.json").writeText("""{"mode":"arcore_rgbd","start_uptime":5.0,"end_uptime":5.6,"aborted":true,"abort_reason":"ARCore session failed: FatalException"}""")
+            File(d, "DONE").writeText("ok\n")
 
             val l = SessionScan.list(root)
-            assertEquals(listOf(b.name, a.name, c.name), l.map { it.name })
+            assertEquals(listOf(b.name, a.name, c.name, d.name), l.map { it.name })
+            assertEquals("ARCore session failed: FatalException", l[3].aborted); assertTrue(l[3].complete)
+            assertNull(l[0].aborted); assertNull(l[2].aborted)
             assertEquals("multicam", l[0].mode); assertEquals(600, l[0].frames); assertEquals(10.0, l[0].durationS!!, 1e-9)
             assertEquals("B: Camera2 multi-cam", l[0].modeLabel)
             assertEquals(1800, l[1].frames); assertEquals(65.5, l[1].durationS!!, 1e-9)

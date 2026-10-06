@@ -66,6 +66,120 @@ def test_confidence_range_and_no_filter():
     # 0..255 confidence
     out2 = filter_depth(mm, np.where(conf == 0, 30, 220).astype(np.uint8), K, conf_levels=False)
     assert out2[0, 0] == 0 and out2[50, 51] == 2000
+    # the app drops raw confidence < (0.5 * 255).toInt() = 127: 126 goes, 127 stays
+    c255 = np.full((H, W), 200, np.uint8)
+    c255[30, 30] = 126
+    c255[30, 31] = 127
+    out3 = filter_depth(mm, c255, K, conf_levels=False)
+    assert out3[30, 30] == 0 and out3[30, 31] == 2000
+
+
+def write_session(p: Path, mm, conf, *, c255=None, min_confidence=None, dK=None, K=(500.0, 500.0, 318.0, 238.0),
+                  wh=(640, 480), smoothed=None):
+    """A one-frame Android session the way ArRecorder.kt writes it (depth + 0..2 conf, optional
+    extras/conf255.zlib.bin + arcore_frames.jsonl, optional dK, optional smoothed depth without conf)."""
+    meta = {"format": "r2s-capture", "platform": "android", "mode": "arcore_rgbd"}
+    if min_confidence is not None:
+        meta["depth_processing"] = {"filter": {"min_confidence": min_confidence}}
+    (p / "session.json").write_text(json.dumps(meta))
+    dblob = deflate(mm.astype("<u2").tobytes()); cblob = deflate(conf.tobytes())
+    (p / "depth.zlib.bin").write_bytes(dblob)
+    (p / "conf.zlib.bin").write_bytes(cblob)
+    line = {"i": 0, "t": 1.0, "w": wh[0], "h": wh[1], "K": list(K), "T": list(np.eye(4).ravel()),
+            "d": [0, len(dblob)], "c": [0, len(cblob)], "dw": mm.shape[1], "dh": mm.shape[0]}
+    if dK is not None:
+        line["dK"] = list(dK)
+    if smoothed is not None:
+        sblob = deflate(smoothed.astype("<u2").tobytes())
+        (p / "depth_smooth.zlib.bin").write_bytes(sblob)
+        line["sd"] = [0, len(sblob)]
+    (p / "frames.jsonl").write_text(json.dumps(line) + "\n")
+    if c255 is not None:
+        (p / "extras").mkdir(exist_ok=True)
+        blob = deflate(c255.tobytes())
+        (p / "extras" / "conf255.zlib.bin").write_bytes(blob)
+        rd = {"t": 1.0, "d": line["d"], "c": line["c"], "c255": [0, len(blob)], "dw": mm.shape[1], "dh": mm.shape[0]}
+        (p / "extras" / "arcore_frames.jsonl").write_text(json.dumps({"n": 0, "t": 1.0, "raw_depth": rd}) + "\n")
+
+
+def test_android_reader_conf255_gate_matches_app():
+    """Raw confidence 100 is level 1 (kept by the 0..2 gate) but below the app's 127: with
+    extras/conf255.zlib.bin the converter drops it too, and conf() is masked to the filtered depth."""
+    from readers.android_reader import AndroidEpisode
+    mm = np.full((H, W), 2000, np.uint16)
+    c255 = np.full((H, W), 230, np.uint8)
+    c255[40:50, 40:50] = 100
+    conf = np.where(c255 < 85, 0, np.where(c255 < 170, 1, 2)).astype(np.uint8)   # ArRecorder.kt quantisation
+    assert conf[45, 45] == 1
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        write_session(p, mm, conf, c255=c255, min_confidence=0.5)
+        ep = AndroidEpisode(p)
+        assert ep.min_conf255 == 127
+        d, c = ep.depth(0), ep.conf(0)
+        assert d[45, 45] == 0 and d[60, 60] == 2000
+        assert c[45, 45] == 0 and c[60, 60] == 2
+        ep.filter_depth = False
+        assert ep.depth(0)[45, 45] == 2000 and ep.conf(0)[45, 45] == 1
+    with tempfile.TemporaryDirectory() as td:          # no conf255 -> 0..2 levels, level 1 survives
+        p = Path(td)
+        write_session(p, mm, conf)
+        ep = AndroidEpisode(p)
+        assert ep.depth(0)[45, 45] == 2000 and ep.conf(0)[45, 45] == 1
+
+
+def test_android_reader_smoothed_depth_has_no_confidence():
+    """The app writes no confidence for the smoothed map: conf() is None and the raw map's confidence
+    must not gate the smoothed depth."""
+    from readers.android_reader import AndroidEpisode
+    mm = np.full((H, W), 2000, np.uint16)
+    conf = np.full((H, W), 2, np.uint8)
+    conf[40:50, 40:50] = 0
+    smooth = np.full((H, W), 2500, np.uint16)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        write_session(p, mm, conf, smoothed=smooth)
+        ep = AndroidEpisode(p)
+        assert ep.depth(0)[45, 45] == 0 and ep.conf(0)[45, 45] == 0      # raw map: gated
+        ep.use_smoothed = True
+        assert ep.conf(0) is None
+        assert ep.depth(0)[45, 45] == 2500                               # smoothed map: not gated by raw conf
+
+
+def test_android_reader_dk_alignment():
+    """Depth recorded at a 16:9 texture field of view (dK) next to a 4:3 CPU image is resampled onto the
+    RGB field of view, so K * dw / w holds for every consumer; without dK nothing changes."""
+    from readers.android_reader import AndroidEpisode
+    # CPU image 640x480, K = (500, 500, 318, 238); texture = the central 640x360 of the same sensor,
+    # depth 160x90 -> dK = texture K * (160/640, 90/360)
+    dK = (500 * 0.25, 500 * 0.25, 318 * 0.25, (238 - 60) * 0.25)
+    mm = np.full((90, 160), 2000, np.uint16)
+    mm[10, 20] = 1234
+    conf = np.full((90, 160), 2, np.uint8)
+    conf[10, 20] = 1
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        write_session(p, mm, conf, dK=dK)
+        ep = AndroidEpisode(p)
+        ep.filter_depth = False
+        assert np.allclose(ep.depth_K(0), [[125, 0, 79.5], [0, 125, 44.5], [0, 0, 1]])
+        d, c = ep.depth(0), ep.conf(0)
+        assert d.shape == (120, 160) and c.shape == (120, 160)
+        assert d[:15].max() == 0 and d[105:].max() == 0 and c[:15].max() == 0     # outside the texture FOV
+        assert np.sum(d[15:105] == 2000) == 90 * 160 - 1 and np.sum(c[15:105] == 2) == 90 * 160 - 1
+        assert d[25, 20] == 1234 and c[25, 20] == 1                             # row 10 + 15 rows of offset
+        ep.align_depth = False
+        assert np.array_equal(ep.depth(0), mm)
+        ep.align_depth = True
+        ep.filter_depth = True
+        assert ep.depth(0).shape == (120, 160)
+    with tempfile.TemporaryDirectory() as td:                                    # dK == K * dw / w: untouched
+        p = Path(td)
+        mm4, conf4 = np.resize(mm, (120, 160)), np.resize(conf, (120, 160))
+        write_session(p, mm4, conf4, dK=(500 * 0.25, 500 * 0.25, 318 * 0.25, 238 * 0.25))
+        ep = AndroidEpisode(p)
+        ep.filter_depth = False
+        assert np.array_equal(ep.depth(0), mm4) and np.array_equal(ep.conf(0), conf4)
 
 
 def test_grazing_floor_rejected():

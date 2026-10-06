@@ -98,6 +98,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     /** What the robot is doing besides following the path. */
     private sealed class Task {
         object Idle : Task()
+        /** Auto mode is driving the robot along the path (set by GO or a new goal in Auto; cleared by stop / e-stop / mode change / arrival). */
+        object Follow : Task()
         class Joy(val v: Float, val w: Float, val at: Long) : Task()
         class Move(val sx: Float, val sz: Float, val h: Float, val dist: Float, val speed: Float, val began: Long) : Task()
         class Turn(var lastH: Float, var turned: Float, val target: Float, val rate: Float, val began: Long) : Task()
@@ -140,7 +142,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         guide = Guidance(this)
         link = RobotLink(this) { msg -> status(msg) }
-        link.onMessage = { m -> if (m.optString("type") == "estop") { task = Task.Idle; guide.say("Robot emergency stop", force = true); buzz(300) } }
+        link.onMessage = { m -> if (m.optString("type") == "estop") { task = Task.Idle; sendStop(); guide.say("Robot emergency stop", force = true); buzz(300) } }
         vibrator = getSystemService(android.os.Vibrator::class.java)
         cloud = PointCloudRenderer(map) { fusion.liveMesh }
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
@@ -200,6 +202,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         robotHeight = pf("height", robotHeight); vMax = pf("vmax", vMax); wMax = pf("wmax", wMax)
         stopDist = pf("stop", stopDist); slowDist = pf("slow", slowDist); goalTol = pf("goalTol", goalTol)
         closedLoopMoves = prefs.getBoolean("closedLoop", true); haptics = prefs.getBoolean("haptics", true)
+        guide.voice = prefs.getBoolean("voice", true); guide.beeps = prefs.getBoolean("beeps", true)
+        cloud.visible = prefs.getBoolean("cloud", true)
         map.maxObstacleHeight = robotHeight + 0.1f
     }
 
@@ -409,10 +413,12 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         manualToggle.setImageResource(if (showManual) R.drawable.ic_chevron_down else R.drawable.ic_gamepad)
     }
 
-    /** iOS GO: (re)start following the current goal. */
+    /** iOS GO: (re)start following the current goal (the planned path is kept). */
     private fun go() {
         val g = goal ?: run { status("Pick a goal first: tap the map or the floor"); guide.say("Pick a goal first", force = true); return }
-        setGoal(g[0], g[1], "GO")
+        task = Task.Follow; blockedSince = 0L; lastPlanMs = 0; arrivedSaid = false
+        status("GO: following the path to (%.2f, %.2f)".format(g[0], g[1]))
+        guide.say("Go", force = true)
     }
 
     /** iOS "Go to" menu (no RoomPlan objects on Android: a few handy goals instead). */
@@ -427,7 +433,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }.show()
     }
 
-    private fun clearGoal() { goal = null; path = null; mapView.goal = null; mapView.path = null; sendStop() }
+    private fun clearGoal() { goal = null; path = null; mapView.goal = null; mapView.path = null; if (task === Task.Follow) task = Task.Idle; sendStop() }
 
     /** Feeds the native HUD cards from the state NavActivity computes for HudView (UI thread). */
     @SuppressLint("SetTextI18n")
@@ -520,10 +526,10 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 number("Goal tolerance", vals["goal"]!!, "cm") { vals["goal"] = it }
             }
             section("Guidance and display") {
-                toggle("Voice instructions", guide.voice) { guide.voice = it }
-                toggle("Proximity beeps", guide.beeps) { guide.beeps = it }
+                toggle("Voice instructions", guide.voice) { guide.voice = it; prefs.edit().putBoolean("voice", it).apply() }
+                toggle("Proximity beeps", guide.beeps) { guide.beeps = it; prefs.edit().putBoolean("beeps", it).apply() }
                 toggle("Haptics", haptics) { c -> haptics = c; prefs.edit().putBoolean("haptics", c).apply() }
-                toggle("Show 3D points", cloud.visible) { cloud.visible = it }
+                toggle("Show 3D points", cloud.visible) { cloud.visible = it; prefs.edit().putBoolean("cloud", it).apply() }
                 button("Voice assistant settings…") { voice?.showSettings() }
             }
         }
@@ -534,7 +540,10 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private fun connect(kind: Int, url: String, ble: String) {
         if (kind >= 3) {   // Neato / OpenBot on the phone's USB-OTG port (robot/UsbRobot.kt)
             val rk = if (kind == 3) UsbRobotKind.NEATO else UsbRobotKind.OPENBOT
-            link.connectCustom("USB ${rk.title}") { incoming -> UsbRobot(this, rk, incoming) { status(it) }.also { it.start() } }
+            link.connectCustom("USB ${rk.title}") { incoming ->
+                // onDead: the serial port died (cable pulled): drop the link so the HUD / auto mode stop treating it as connected
+                UsbRobot(this, rk, incoming, { status(it) }, onDead = { runOnUiThread { if (link.kind == RobotLink.Kind.CUSTOM) link.disconnect() } }).also { it.start() }
+            }
             return
         }
         val k = RobotLink.Kind.values()[kind]
@@ -577,8 +586,11 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         override fun pose() = lastPose?.let { doubleArrayOf(it[0].toDouble(), it[1].toDouble(), it[2].toDouble()) }
         override fun goTo(x: Double, z: Double, label: String, drive: Boolean) {
-            setGoal(x.toFloat(), z.toFloat(), "voice: $label")
-            if (drive) setMode("auto")
+            // switch mode first: setDrive resets the task, and setGoal in Auto starts following
+            runOnUiThread {
+                if (drive && this@NavActivity.drive != Drive.AUTO) setDrive(Drive.AUTO)
+                setGoal(x.toFloat(), z.toFloat(), "voice: $label")
+            }
         }
         override fun goToRelative(forward: Double, left: Double, drive: Boolean) {
             val p = lastPose ?: return
@@ -591,7 +603,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         override fun mode() = drive.name.lowercase()
         override fun clearGoal() = this@NavActivity.clearGoal()
-        override fun busy() = task is Task.Move || task is Task.Turn || (drive == Drive.AUTO && goal != null && !arrivedSaid)
+        override fun busy() = task is Task.Move || task is Task.Turn || task === Task.Follow || link.motionPending
         override fun statusJSON(): JSONObject {
             val o = JSONObject().put("mode", mode()).put("robot_connected", link.connected).put("robot", link.robotName)
             lastPose?.let { o.put("pose", JSONObject().put("x", it[0].toDouble()).put("z", it[1].toDouble()).put("heading_deg", Math.toDegrees(it[2].toDouble()))) }
@@ -645,6 +657,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     private fun setGoal(x: Float, z: Float, src: String) {
         goal = floatArrayOf(x, z); path = null; lastPlanMs = 0; arrivedSaid = false
+        if (drive == Drive.AUTO) { task = Task.Follow; blockedSince = 0L }
         mapView.goal = goal
         status("goal (%.2f, %.2f) from %s".format(x, z, src))
         guide.say("New goal set", force = true)
@@ -691,12 +704,12 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     private fun resetMap() {
-        goal = null; path = null
+        clearGoal()
         gl.queueEvent {
             map = MapBuilder().also { it.maxObstacleHeight = robotHeight + 0.1f }
             fusion.close()
             fusion = DepthFusion(map)
-            cloud = PointCloudRenderer(map) { fusion.liveMesh }.also { it.create() }
+            cloud = PointCloudRenderer(map) { fusion.liveMesh }.also { it.visible = prefs.getBoolean("cloud", true); it.create() }
         }
         status("new empty map")
     }
@@ -716,10 +729,23 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     s.configure(cfg)
                     if (cfg.depthMode == Config.DepthMode.DISABLED) status("this phone has no ARCore Depth API: obstacles come from feature points only")
                 }
-            } catch (e: Exception) { status("ARCore unavailable: $e"); return }
+            } catch (e: Exception) { arFailed("ARCore unavailable: ${e.javaClass.simpleName}", "$e"); return }
         }
-        try { session?.resume() } catch (e: Exception) { status("camera: $e"); return }
+        try { session?.resume() } catch (e: Exception) { arFailed("Camera unavailable: ${e.javaClass.simpleName}", "camera: $e"); return }
         gl.onResume()
+    }
+
+    /**
+     * No tracking will ever come (no ARCore on this device / emulator, camera denied or taken): say so in the
+     * top bar instead of "Starting ARCore…" forever, and keep the robot still (Auto / GO drive on poses).
+     */
+    private fun arFailed(short: String, detail: String) {
+        status(detail)
+        trackDot.background = Ui.oval(Ui.RED)
+        trackText.text = short
+        mapText.text = "no tracking: Auto and GO are off, Manual still works"
+        if (drive == Drive.AUTO) setDrive(Drive.GUIDE)
+        goBtn.isEnabled = false; goBtn.alpha = 0.4f
     }
 
     override fun onPause() {
@@ -787,7 +813,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         if (!tracking) {
             if (trackingWasOk) {
                 trackingWasOk = false
-                task = Task.Idle; sendStop(); buzz(300)
+                if (task !== Task.Follow) task = Task.Idle    // following resumes when tracking returns; nothing is streamed meanwhile
+                sendStop(); buzz(300)
                 guide.say("Tracking lost, stopping", force = true)
             }
             if (now - lastHudMs > 200) {
@@ -812,7 +839,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             frame.acquireDepthImage16Bits().use { d ->
                 if (d.timestamp != lastDepthTs) {
                     lastDepthTs = d.timestamp
-                    val k = cam.imageIntrinsics
+                    val k = cam.textureIntrinsics     // ARCore depth covers the camera texture's FOV; DepthFusion scales to the depth size
                     val p = d.planes[0]
                     val mm = DepthFilter.shortsLE(SessionWriter.packPlane(p.buffer, d.width, d.height, p.rowStride, 2, p.pixelStride.coerceAtLeast(2)), d.width * d.height)
                     fusion.submit(DepthFusion.Frame(null, null, 0, 0, mm, d.width, d.height,
@@ -869,13 +896,14 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         if (p != null && p.size >= 2) {
             cmd = Planner.follow(p, rx, rz, heading, frontClear, vMax, wMax, stopDist = stopDist, slowDist = slowDist, goalTol = goalTol)
             if (cmd.arrived) {
-                if (!arrivedSaid) { arrivedSaid = true; guide.say("Goal reached", force = true); buzz(200); task = Task.Idle }
+                if (!arrivedSaid) { arrivedSaid = true; guide.say("Goal reached", force = true); buzz(200) }
+                if (task === Task.Follow) task = Task.Idle
                 blockedSince = 0L
             } else {
                 arrivedSaid = false
                 if (cmd.blocked) guide.say("Obstacle ahead, ${guide.meters(frontClear.coerceAtLeast(0f))}")
                 else guide.say(guide.instruction(cmd.bearing, cmd.remaining))
-                if (drive == Drive.AUTO && task === Task.Idle) {
+                if (drive == Drive.AUTO && task === Task.Follow) {   // only after GO / a new goal in Auto; e-stop, STOP and mode changes end it
                     out = floatArrayOf(cmd.v, cmd.w)
                     // blocked for 3 s: back up a little if the way behind is clear, then replan
                     if (cmd.blocked) {
@@ -893,12 +921,14 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         fun wrap(a: Float): Float { var r = a; while (r > Math.PI) r -= (2 * Math.PI).toFloat(); while (r < -Math.PI) r += (2 * Math.PI).toFloat(); return r }
         when (val t = task) {
-            is Task.Idle -> {}
+            is Task.Idle, is Task.Follow -> {}
             is Task.Joy -> if (now - t.at > 500 && t.v == 0f && t.w == 0f) task = Task.Idle else out = safety(t.v, t.w)
-            is Task.Backup -> if (now < t.until && rear > 0.1f) out = floatArrayOf(-0.08f, 0f) else task = Task.Idle
+            is Task.Backup -> if (now < t.until && rear > 0.1f) out = floatArrayOf(-0.08f, 0f)
+                else task = if (goal != null && drive == Drive.AUTO) Task.Follow else Task.Idle
             is Task.Move -> {
-                val travelled = (rx - t.sx) * kotlin.math.cos(t.h) + (rz - t.sz) * kotlin.math.sin(t.h)
-                val remaining = abs(t.dist) - abs(travelled)
+                // progress from the phone pose: the same point the task's start (sx, sz) was taken from
+                val travelled = NavMath.travelledAlong(x, z, t.sx, t.sz, t.h)
+                val remaining = NavMath.moveRemaining(t.dist, x, z, t.sx, t.sz, t.h)
                 if (remaining <= 0.01f || now - t.began > (abs(t.dist) / maxOf(0.02f, t.speed) * 3 + 3) * 1000) {
                     task = Task.Idle; guide.say("Done", force = true)
                 } else {

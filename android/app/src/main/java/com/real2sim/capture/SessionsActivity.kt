@@ -31,7 +31,6 @@ class SessionsActivity : AppCompatActivity() {
     private lateinit var list: LinearLayout
     private lateinit var status: TextView
     private lateinit var receiver: TextView
-    @Volatile private var uploading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Ui.edgeToEdge(this)
@@ -63,7 +62,15 @@ class SessionsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         showReceiver()
+        // Upload state lives in Uploader so it survives recreation (rotation, Done + reopen): rebind and restore.
+        Uploader.listener = { msg -> runOnUiThread { if (!isDestroyed) setStatus(msg) } }
+        if (Uploader.running != null) Uploader.lastStatus.takeIf { it.isNotEmpty() }?.let { setStatus(it) }
         refresh()
+    }
+
+    override fun onPause() {
+        Uploader.listener = null
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -96,11 +103,15 @@ class SessionsActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
+        // A delete finishing after Done/rotation posts refresh() to a destroyed activity: the executor is gone.
+        if (isDestroyed || exec.isShutdown) return
         val root = SessionWriter.sessionsRoot(this)
-        exec.execute {
-            val sessions = try { SessionScan.list(root) } catch (e: Exception) { setStatus("could not list sessions: $e"); emptyList() }
-            runOnUiThread { if (!isDestroyed) show(sessions) }
-        }
+        try {
+            exec.execute {
+                val sessions = try { SessionScan.list(root) } catch (e: Exception) { setStatus("could not list sessions: $e"); emptyList() }
+                runOnUiThread { if (!isDestroyed) show(sessions) }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {}
     }
 
     private fun show(sessions: List<SessionSummary>) {
@@ -144,6 +155,8 @@ class SessionsActivity : AppCompatActivity() {
         s.frames?.let { parts.add("$it frames") }
         text.addView(Ui.label(this, parts.joinToString(" · "), 13f, Ui.SECONDARY, digits = true).apply { setPadding(0, dp(3), 0, 0) })
         if (!s.complete) text.addView(Ui.label(this, "incomplete (no session.json)", 12f, Ui.ORANGE).apply { setPadding(0, dp(2), 0, 0) })
+        else if (s.aborted != null) text.addView(Ui.label(this, "aborted: ${s.aborted}", 12f, Ui.ORANGE).apply {
+            maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(2), 0, 0) })
         content.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
         content.addView(Ui.icon(this, R.drawable.ic_chevron_right, Ui.TERTIARY, 16))
         content.setOnClickListener { open(s) }
@@ -168,12 +181,7 @@ class SessionsActivity : AppCompatActivity() {
     private fun upload(s: SessionSummary) {
         val base = prefs().getString("upload_url", "").orEmpty().trim()
         if (base.isEmpty()) { setStatus("set the receiver URL (tools/receiver.py) first"); editReceiver(); return }
-        if (uploading) { setStatus("an upload is already running"); return }
-        uploading = true
-        Thread({
-            try { Uploader.upload(s.dir, base) { setStatus("${s.name}: $it") } } catch (e: Exception) { setStatus("upload failed: $e") }
-            finally { uploading = false }
-        }, "upload").start()
+        if (!Uploader.start(s.dir, base)) setStatus("an upload is already running")
     }
 
     private fun confirmDelete(s: SessionSummary) {
@@ -185,7 +193,7 @@ class SessionsActivity : AppCompatActivity() {
                 exec.execute {
                     val ok = deleteDir(s.dir)
                     setStatus(if (ok) "deleted ${s.name}" else "could not delete everything in ${s.name}")
-                    runOnUiThread { refresh() }
+                    runOnUiThread { if (!isDestroyed) refresh() }
                 }
             }
             .show()

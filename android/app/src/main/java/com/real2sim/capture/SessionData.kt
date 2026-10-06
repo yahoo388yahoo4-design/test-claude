@@ -595,7 +595,14 @@ object Ply {
         return PlyData(xyz, rgb, tris.toIntArray())
     }
 
-    fun read(f: File): PlyData? = if (f.isFile) parse(f.readBytes()) else null
+    /** Whole-file parse; a mesh.ply bigger than this would not fit the heap of a phone app anyway. */
+    const val MAX_BYTES = 192L shl 20
+
+    fun read(f: File): PlyData? {
+        if (!f.isFile || f.length() > MAX_BYTES) return null
+        // OutOfMemoryError is an Error: without this it would kill the viewer's io thread and the app.
+        return try { parse(f.readBytes()) } catch (_: OutOfMemoryError) { null }
+    }
 }
 
 // ------------------------------------------------------------------------------------------ charts
@@ -686,6 +693,8 @@ data class SessionSummary(
     val bytes: Long,
     val frames: Int?,
     val complete: Boolean,
+    /** Set when the recorder could not start (session.json "aborted"); the reason when it was recorded. */
+    val aborted: String? = null,
 ) {
     val modeLabel: String get() = modeLabel(mode)
 }
@@ -713,8 +722,9 @@ object SessionScan {
             else -> counts?.num("frames")?.toInt()?.takeIf { it > 0 || mode == "arcore_rgbd" }
         }
         if (frames == null && mode == "arcore_rgbd") frames = countLines(File(dir, "frames.jsonl"))
+        val aborted = if (meta?.get("aborted") == true) meta.str("abort_reason") ?: "recorder did not start" else null
         return SessionSummary(dir, dir.name, mode, if (s != null && e != null && e >= s) e - s else null,
-            dirSize(dir), frames, File(dir, "DONE").isFile || meta != null)
+            dirSize(dir), frames, File(dir, "DONE").isFile || meta != null, aborted)
     }
 
     fun countLines(f: File): Int? = if (f.isFile) f.bufferedReader().useLines { l -> l.count { it.isNotBlank() } } else null

@@ -9,8 +9,8 @@ import java.nio.FloatBuffer
 
 /**
  * Live depth view: the newest *filtered* depth map (DepthFusion.liveDepth, turbo colours, rejected pixels
- * transparent) blended over the camera image, registered to it through ARCore's image-normalised
- * coordinates (the depth map covers the CPU image).
+ * transparent) blended over the camera image, registered to it through ARCore's texture-normalised
+ * coordinates (ARCore depth covers the camera texture's field of view, as in the hello_ar_depth sample).
  */
 class DepthOverlayRenderer(private val source: () -> DepthFusion.LiveDepth?) {
     private var program = 0
@@ -51,7 +51,7 @@ class DepthOverlayRenderer(private val source: () -> DepthFusion.LiveDepth?) {
     fun draw(frame: Frame) {
         if (frame.hasDisplayGeometryChanged() || !uvReady) {
             ndc.position(0); uv.position(0)
-            frame.transformCoordinates2d(Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES, ndc, Coordinates2d.IMAGE_NORMALIZED, uv)
+            frame.transformCoordinates2d(Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES, ndc, Coordinates2d.TEXTURE_NORMALIZED, uv)
             uvReady = true
         }
         val d = source() ?: return

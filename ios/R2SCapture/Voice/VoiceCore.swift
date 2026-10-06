@@ -75,7 +75,7 @@ enum IntentParser {
     /// True if a (partial) transcript contains a stop word: checked on every partial result so the robot
     /// stops before the sentence is even finished.
     static func containsStop(_ text: String) -> Bool {
-        words(text).contains { stopWords.contains($0) }
+        words(normalise(text)).contains { stopWords.contains($0) }
     }
 
     static func parse(_ text: String, labels: [String] = []) -> [VoiceAction]? {

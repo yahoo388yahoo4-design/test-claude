@@ -15,12 +15,14 @@ import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.Image
 import android.media.ImageReader
 import android.media.MediaCodec
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -29,8 +31,9 @@ import android.view.TextureView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class Camera2Options(
     val rawDng: Boolean,
@@ -100,10 +103,17 @@ class Camera2Recorder(
         var fps = 30
         var encoder: VideoEncoder? = null
         val enc: VideoEncoder get() = encoder!!
-        val results = ConcurrentHashMap<Long, JSONObject>()
+        /**
+         * Per-frame CaptureResult lines, streamed to disk while recording and joined to pts.csv at stop.
+         * Under extras/, not cams/: the reader globs the jsonl files in cams/ to find the cameras.
+         */
+        val resultsRel: String get() = "extras/$name.results.jsonl"
     }
 
     private data class Attempt(val step: CameraBudget.Step, val preview: String)
+
+    /** One RAW capture: the buffer and its result arrive in either order; paired by sensor timestamp. */
+    private class RawPending(var img: Image? = null, var res: CaptureResult? = null, val at: Long = SystemClock.elapsedRealtime())
 
     private var candidates: List<Stream> = emptyList()
     private val streams = mutableListOf<Stream>()
@@ -111,10 +121,12 @@ class Camera2Recorder(
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var rawReader: ImageReader? = null
+    private var confBlob: SessionWriter.Blob? = null
     private var rawStream: Stream? = null
     private var rawAllowed = opt.rawDng
-    private val pendingRaw = ConcurrentHashMap<Long, TotalCaptureResult>()
-    private var rawCount = 0
+    private val pendingRaw = HashMap<Long, RawPending>()   // camera2 handler thread only
+    private val rawWriter = Executors.newSingleThreadExecutor { r -> Thread(r, "dng-writer") }
+    @Volatile private var rawCount = 0
     private var frames = 0L
     @Volatile private var running = false
     @Volatile private var stopped = false
@@ -141,10 +153,12 @@ class Camera2Recorder(
     }
 
     // ToF
+    private var depthId: String? = null
     private var depthDevice: CameraDevice? = null
     private var depthReader: ImageReader? = null
     private var depthBlob: SessionWriter.Blob? = null
     private var depthCount = 0
+    @Volatile private var depthOpenedAt = 0L
 
     private fun lensName(c: CameraCharacteristics, fallback: String): String {
         val f = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return fallback
@@ -209,20 +223,47 @@ class Camera2Recorder(
             put("lenses", JSONArray(candidates.map { it.name })); put("max_width", opt.maxWidth); put("fps", opt.fps)
         })
 
-        // ToF / DEPTH16 camera (may be hidden from cameraIdList; inventory probed ids 0..15)
-        val depthId = inv.getJSONObject("cameras").keys().asSequence().firstOrNull { id ->
-            inv.getJSONObject("cameras").getJSONObject(id).optBoolean("_has_depth16")
-        }
+        // ToF / DEPTH16 camera (may be hidden from cameraIdList; inventory probed ids 0..15). It is
+        // opened as a SECOND device, so it must be one that can be held together with the logical
+        // camera: opening the logical camera itself, one of its physical members, or an id the HAL
+        // marks as conflicting evicts our main device (cameraserver evicts the existing client of the
+        // same app) and the recording silently stops.
+        val cams = inv.getJSONObject("cameras")
+        val listed = cm.cameraIdList.toSet()
+        val concurrent: List<Set<String>> = if (Build.VERSION.SDK_INT >= 30) cm.concurrentCameraIds.toList() else emptyList()
+        val depthCandidates = cams.keys().asSequence().filter { cams.getJSONObject(it).optBoolean("_has_depth16") }.toList()
+        depthId = CameraInfo.pickDepthCamera(depthCandidates, logical, physical, listed, concurrent, Build.VERSION.SDK_INT >= 30)
+        if (depthId == null && depthCandidates.isNotEmpty()) s.meta.getJSONObject("android").put("tof_error",
+            "DEPTH16 camera(s) ${depthCandidates.joinToString()} cannot be opened concurrently with camera $logical; recorded without ToF")
         multicamMeta().put("depth16_camera", depthId ?: JSONObject.NULL)
+        multicamMeta().put("depth16_candidates", JSONArray(depthCandidates))
 
         val cb = object : CameraDevice.StateCallback() {
             override fun onOpened(d: CameraDevice) { device = d; configureWhenPreviewReady(d, 0) }
-            override fun onDisconnected(d: CameraDevice) { d.close() }
-            override fun onError(d: CameraDevice, e: Int) { status("camera error $e"); d.close() }
+            override fun onDisconnected(d: CameraDevice) { mainCameraLost(d, "camera disconnected") }
+            override fun onError(d: CameraDevice, e: Int) { mainCameraLost(d, "camera error $e") }
         }
         cm.openCamera(logical, executor, cb)
-        if (depthId != null) openDepth(depthId)
         return null
+    }
+
+    /**
+     * The main device went away (evicted by another client, HAL error). Make it visible and finalise
+     * the files instead of leaving the UI "recording" with nothing written. Camera thread.
+     */
+    private fun mainCameraLost(d: CameraDevice, what: String) {
+        try { d.close() } catch (_: Exception) {}
+        if (stopped) return
+        val sinceDepth = if (depthOpenedAt == 0L) -1 else SystemClock.elapsedRealtime() - depthOpenedAt
+        val msg = if (sinceDepth in 0..1500) "$what right after opening ToF camera $depthId: conflicting cameras" else what
+        multicamMeta().put(if (running) "disconnect" else "configure_error", msg)
+        if (sinceDepth in 0..1500) s.meta.getJSONObject("android").put("tof_error", msg)
+        running = false
+        stopped = true
+        try { depthDevice?.close() } catch (_: Exception) {}
+        for (st in streams) try { st.enc.stop() } catch (e: Exception) { Log.w(TAG, "encoder stop ${st.name}", e) }
+        for (st in candidates) if (st !in streams) { st.encoder?.discard(); st.encoder = null }
+        status("multicam: $msg\nrecording stopped: press stop")
     }
 
     // ------------------------------------------------------------------ configuration (budget + preview)
@@ -388,7 +429,11 @@ class Camera2Recorder(
             Log.e(TAG, "setRepeatingRequest", e)
             multicamMeta().put("configure_error", "repeating request failed: $e")
             status("multicam: camera refused the repeating request: $e")
+            return
         }
+        // Only now the second device: the main stream is running, so a conflict shows up as a
+        // disconnect of the main device (mainCameraLost) with a clear message rather than a silent one.
+        depthId?.let { openDepth(it) }
     }
 
     private fun budgetText(): String = if (budgetActions.isEmpty()) "" else "\nbudget: " + budgetActions.joinToString(", ")
@@ -425,10 +470,16 @@ class Camera2Recorder(
                     val t = r.get(CaptureResult.SENSOR_TIMESTAMP) ?: res.get(CaptureResult.SENSOR_TIMESTAMP) ?: continue
                     val o = JSONObject().put("t", t / 1e9)
                     CameraInfo.resultFields(r, o)
-                    st.results[t] = o
+                    // Not retained: one line per frame to disk, joined to pts.csv at stop (O(1) heap per frame).
+                    s.csv(st.resultsRel, "", JsonSafe.stringify(o))
                     try { st.enc.poll() } catch (e: Exception) { Log.w(TAG, "encoder ${st.name}", e) }
                 }
-                if (req.tag == RAW_TAG) res.get(CaptureResult.SENSOR_TIMESTAMP)?.let { t -> pendingRaw[t] = res }
+                if (req.tag == RAW_TAG) {
+                    // The DNG needs the RAW sensor's own result (neutral point, gains, noise profile).
+                    val pr: CaptureResult = rawStream?.physicalId?.let { phys[it] } ?: res
+                    val keys = setOfNotNull(pr.get(CaptureResult.SENSOR_TIMESTAMP), res.get(CaptureResult.SENSOR_TIMESTAMP))
+                    for (t in keys) rawArrived(t, res = pr)
+                }
             } catch (e: Exception) { Log.w(TAG, "capture result", e) }
             if (frames % 30 == 0L) status("multicam ${streams.size} cams f=$frames raw=$rawCount tof=$depthCount drop=${s.droppedWrites}\npreview: $previewKind" + budgetText())
         }
@@ -454,26 +505,58 @@ class Camera2Recorder(
 
     private fun onRaw(r: ImageReader) {
         val img = r.acquireNextImage() ?: return
-        val res = pendingRaw.remove(img.timestamp)
-        val st = rawStream
-        if (res == null || st == null) { img.close(); return }
+        if (rawStream == null || stopped) { img.close(); return }
+        rawArrived(img.timestamp, img = img)   // RAW_SENSOR: Image.timestamp == the result's SENSOR_TIMESTAMP
+    }
+
+    /**
+     * Camera2 does not order ImageReader.onImageAvailable against onCaptureCompleted: whichever half
+     * of a RAW capture comes first waits here for the other. Camera thread only.
+     */
+    private fun rawArrived(t: Long, img: Image? = null, res: CaptureResult? = null) {
+        val p = pendingRaw.getOrPut(t) { RawPending() }
+        img?.let { p.img?.close(); p.img = it }
+        res?.let { p.res = it }
+        val i = p.img; val r = p.res
+        if (i != null && r != null) { pendingRaw.remove(t); writeDng(i, r) }
+        // A half whose counterpart never came must not pin an ImageReader slot (maxImages = 3) or leak.
+        val now = SystemClock.elapsedRealtime()
+        pendingRaw.entries.removeAll { (_, v) -> (now - v.at > RAW_PAIR_TIMEOUT_MS).also { if (it) v.img?.close() } }
+    }
+
+    /** DngCreator + file write take 100-300 ms: off the camera thread, the image always closed. */
+    private fun writeDng(img: Image, res: CaptureResult) {
+        val st = rawStream ?: run { img.close(); return }
         val rel = "cams/raw/${st.name}_%.6f.dng".format(java.util.Locale.US, img.timestamp / 1e9)
         try {
-            s.file(rel).outputStream().use { out -> DngCreator(st.chars, res).use { it.writeImage(out, img) } }
-            rawCount++
-        } catch (e: Exception) { Log.w(TAG, "dng", e) } finally { img.close() }
+            rawWriter.execute {
+                try {
+                    s.file(rel).outputStream().use { out -> DngCreator(st.chars, res).use { it.writeImage(out, img) } }
+                    rawCount++
+                } catch (e: Exception) { Log.w(TAG, "dng", e) } finally { img.close() }
+            }
+        } catch (e: Exception) { img.close(); Log.w(TAG, "dng queue", e) }   // writer already shut down
+    }
+
+    /** Camera thread: drop RAW halves still waiting for their counterpart. */
+    private fun closePendingRaw() {
+        for (v in pendingRaw.values) v.img?.close()
+        pendingRaw.clear()
     }
 
     // ------------------------------------------------------------------ ToF DEPTH16
     @SuppressLint("MissingPermission")
     private fun openDepth(id: String) {
-        val c = cm.getCameraCharacteristics(id)
+        if (stopped) return
+        val c = try { cm.getCameraCharacteristics(id) } catch (e: Exception) {
+            s.meta.getJSONObject("android").put("tof_error", "characteristics of camera $id: $e"); return
+        }
         val sizes = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)?.getOutputSizes(ImageFormat.DEPTH16) ?: return
         val sz = sizes.maxByOrNull { it.width * it.height } ?: return
         val reader = ImageReader.newInstance(sz.width, sz.height, ImageFormat.DEPTH16, 4)
         depthReader = reader
         depthBlob = s.Blob("cams/tof_depth.zlib.bin")
-        val confBlob = s.Blob("cams/tof_conf.zlib.bin")
+        val confBlob = s.Blob("cams/tof_conf.zlib.bin").also { this.confBlob = it }
         val jsonl = "cams/tof_depth.jsonl"
         val k = c.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
         reader.setOnImageAvailableListener({ r ->
@@ -498,8 +581,10 @@ class Camera2Recorder(
                 depthCount++
             } catch (e: Exception) { Log.w(TAG, "tof frame", e) } finally { img.close() }
         }, handler)
-        cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
+        depthOpenedAt = SystemClock.elapsedRealtime()
+        try { cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
             override fun onOpened(d: CameraDevice) {
+                if (stopped) { d.close(); return }
                 depthDevice = d
                 d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(OutputConfiguration(reader.surface)), executor,
                     object : CameraCaptureSession.StateCallback() {
@@ -512,7 +597,12 @@ class Camera2Recorder(
             }
             override fun onDisconnected(d: CameraDevice) { d.close() }
             override fun onError(d: CameraDevice, e: Int) { s.meta.getJSONObject("android").put("tof_error", "open error $e (concurrent use refused?)"); d.close() }
-        })
+        }) } catch (e: Exception) {   // hidden physical ids throw synchronously on Q+, SecurityException, ...
+            Log.w(TAG, "openCamera $id", e)
+            s.meta.getJSONObject("android").put("tof_error", "open camera $id: $e")
+            depthOpenedAt = 0L
+            return
+        }
         s.meta.getJSONObject("android").put("tof", JSONObject().apply {
             put("camera_id", id); put("w", sz.width); put("h", sz.height)
             put("files", "cams/tof_depth.zlib.bin (uint16 mm) + cams/tof_conf.zlib.bin (0..2) + cams/tof_depth.jsonl")
@@ -549,7 +639,7 @@ class Camera2Recorder(
         o.put("_notes", "intrinsics_active_array = [fx, fy, cx, cy, s] in pre-correction active-array pixels (Camera2). K_stream rescales to the " +
             "stream assuming the stream covers the full active array (true for 4:3 streams; 16:9 streams crop vertically). " +
             "pose_* = lens pose relative to pose_reference (0 primary camera, 1 gyroscope, 2 undefined, 3 automotive), Android sensor axes.")
-        s.text("cams/calibration.json", JsonSafe.stringify(o, 1))
+        s.textNow("cams/calibration.json", JsonSafe.stringify(o, 1))
     }
 
     private fun kForStream(c: CameraCharacteristics, size: Size): JSONArray? {
@@ -578,6 +668,21 @@ class Camera2Recorder(
             "\npreview: $previewKind" + (if (budgetActions.isEmpty()) "" else "   budget: " + budgetActions.joinToString(", "))
 
     // ------------------------------------------------------------------ stop
+    /** Cleanup after start() failed: nothing to join, just free the camera, encoders and the thread. */
+    fun release() {
+        running = false
+        stopped = true
+        try { session?.close() } catch (_: Exception) {}
+        try { device?.close() } catch (_: Exception) {}
+        try { depthDevice?.close() } catch (_: Exception) {}
+        rawReader?.close(); depthReader?.close()
+        for (st in candidates) { try { st.encoder?.discard() } catch (_: Exception) {}; st.encoder = null }
+        try { depthBlob?.close() } catch (_: Exception) {}
+        try { confBlob?.close() } catch (_: Exception) {}
+        previewSurface?.release(); previewSurface = null
+        thread.quitSafely()
+    }
+
     fun stop() {
         running = false
         stopped = true
@@ -586,6 +691,7 @@ class Camera2Recorder(
             try { session?.stopRepeating(); session?.abortCaptures() } catch (_: Exception) {}
             // Encoders made for configuration attempts that were never used.
             for (st in candidates) if (st !in streams) { st.encoder?.discard(); st.encoder = null }
+            closePendingRaw()
             done.countDown()
         }
         done.await(2, java.util.concurrent.TimeUnit.SECONDS)
@@ -593,32 +699,48 @@ class Camera2Recorder(
         for (st in streams) try { st.enc.stop() } catch (e: Exception) { Log.w(TAG, "encoder stop ${st.name}", e) }
         try { session?.close() } catch (_: Exception) {}
         device?.close(); depthDevice?.close()
+        // DNGs still being written must finish before their ImageReader goes away.
+        rawWriter.shutdown()
+        try { rawWriter.awaitTermination(5, TimeUnit.SECONDS) } catch (_: InterruptedException) {}
         rawReader?.close(); depthReader?.close()
         try { depthBlob?.close() } catch (_: Exception) {}
+        try { confBlob?.close() } catch (_: Exception) {}
         previewSurface?.release(); previewSurface = null
-        // Join per-frame results to video samples -> cams/<name>.jsonl (FORMAT.md mode C).
+        // Join per-frame results to video samples -> cams/<name>.jsonl (FORMAT.md mode C): a streaming
+        // merge of pts.csv and the results lines (both in sensor-timestamp order), written line by line
+        // on this (background) thread so the file can never be dropped by the IO queue.
         var nTotal = 0
         for (st in streams) {
             try {
                 val pts = File(st.enc.file.path + ".pts.csv")
+                val results = s.file(st.resultsRel)
+                val complete = s.closeCsv(st.resultsRel)
                 val K = kForStream(st.chars, st.size)
-                val sb = StringBuilder()
-                val keys = st.results.keys.sorted().toLongArray()
-                pts.readLines().drop(1).forEach { line ->
-                    val parts = line.split(","); val i = parts[0].toInt(); val tNs = parts[2].toLong()
-                    // pts are us -> match the result with the nearest sensor timestamp
-                    var idx = java.util.Arrays.binarySearch(keys, tNs).let { if (it < 0) -it - 1 else it }
-                    if (idx > 0 && (idx >= keys.size || kotlin.math.abs(keys[idx - 1] - tNs) < kotlin.math.abs(keys[idx] - tNs))) idx--
-                    val r = if (keys.isNotEmpty() && kotlin.math.abs(keys[idx.coerceIn(0, keys.size - 1)] - tNs) < 2_000_000) st.results[keys[idx.coerceIn(0, keys.size - 1)]] else null
-                    val o = JSONObject(r?.let { JsonSafe.stringify(it) } ?: "{}")
-                    o.put("i", i); o.put("t", r?.optDouble("t") ?: (tNs / 1e9)); o.put("w", st.size.width); o.put("h", st.size.height)
-                    o.put("K", K ?: JSONObject.NULL)
-                    o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { o.put("exp", it / 1e9) }
-                    o.opt("iso")?.let { o.put("iso", it) }
-                    sb.append(JsonSafe.stringify(o)).append('\n')
-                    nTotal++
+                val ptsSeq = sequence {
+                    pts.bufferedReader().useLines { lines ->
+                        for (line in lines.drop(1)) { val parts = line.split(","); yield(parts[2].toLong() to parts[0].toInt()) }
+                    }
                 }
-                s.text("cams/${st.name}.jsonl", sb.toString())
+                val resSeq = sequence {
+                    if (results.isFile) results.bufferedReader().useLines { lines ->
+                        for (line in lines) if (line.isNotBlank()) {
+                            val t = PtsJoin.resultTimestampNs(line) ?: continue
+                            yield(t to line)
+                        }
+                    }
+                }
+                s.file("cams/${st.name}.jsonl").bufferedWriter().use { w ->
+                    PtsJoin.join(ptsSeq, resSeq) { i, tNs, r ->
+                        val o = JSONObject(r ?: "{}")
+                        o.put("i", i); o.put("t", if (r != null) o.optDouble("t") else (tNs / 1e9)); o.put("w", st.size.width); o.put("h", st.size.height)
+                        o.put("K", K ?: JSONObject.NULL)
+                        o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { o.put("exp", it / 1e9) }
+                        o.opt("iso")?.let { o.put("iso", it) }
+                        w.write(JsonSafe.stringify(o)); w.write("\n")
+                        nTotal++
+                    }
+                }
+                if (complete) results.delete() else Log.w(TAG, "${st.resultsRel} may be incomplete; kept")
             } catch (e: Exception) { Log.w(TAG, "jsonl ${st.name}", e) }
         }
         s.meta.put("counts", JSONObject().apply {
@@ -636,6 +758,8 @@ class Camera2Recorder(
     companion object {
         const val TAG = "Camera2Recorder"
         const val RAW_TAG = "raw"
+        /** How long one half of a RAW capture (buffer or result) waits for the other. */
+        const val RAW_PAIR_TIMEOUT_MS = 3000L
         /** Extra preview stream on the main lens. */
         const val PREVIEW_SURFACE = "preview_surface"
         /** Preview fed by the recorded main stream (surface sharing), no extra camera stream. */

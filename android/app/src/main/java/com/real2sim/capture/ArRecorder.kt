@@ -80,8 +80,16 @@ class ArRecorder(
     private lateinit var sdepthBlob: SessionWriter.Blob
     /** frames.jsonl lines held back a few frames so a late depth map can still be attached. */
     private val pending = ArrayDeque<Pair<Long, JSONObject>>()
-    /** t_ns -> (T, K, w, h) for every frame, to pose the hi-res stills at stop. */
-    private val poseByT = HashMap<Long, Pair<JSONArray, JSONObject>>()
+    /** Pose + CPU-image intrinsics of one ARCore frame (compact; the JSON is built when a still is written). */
+    private class PoseRec(val m: FloatArray /* column-major camera-to-world */, val K: FloatArray /* fx, fy, cx, cy */, val w: Int, val h: Int, val track: String)
+    /**
+     * Hi-res stills only: t_ns -> pose of the last ~2 s of frames, to pose the stills (same sensor timestamp).
+     * Written, read and evicted on the GL thread in [record]; [writeStillJsons] flushes the rest at stop.
+     */
+    private val poseByT = HashMap<Long, PoseRec>()
+    private val poseOrder = ArrayDeque<Long>()
+    @Volatile private var stillW = 0
+    @Volatile private var stillH = 0
     private var depthDims: Pair<Int, Int>? = null
     private var lastDepthTs = -1L
     private var lastRawDepthTs = -1L
@@ -111,6 +119,8 @@ class ArRecorder(
     private val viewM = FloatArray(16)
     private val projM = FloatArray(16)
     private var lastK = floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f)   // fx, fy, cx, cy, w, h of the CPU image
+    /** fx, fy, cx, cy, w, h of the camera texture: the field of view ARCore depth maps cover. */
+    private var lastKTex = floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f)
     private var lastPoseM = FloatArray(16)
     private var lastHeading = 0f
     @Volatile var showCloud = true
@@ -126,11 +136,16 @@ class ArRecorder(
     private var stillTicker: Runnable? = null
     private val stillIndex = java.util.concurrent.ConcurrentLinkedQueue<Pair<Long, String>>()
     @Volatile private var arActive = false
+    @Volatile private var released = false
 
     fun create(): String? {
         val features = if (opt.hiResStills) EnumSet.of(Session.Feature.SHARED_CAMERA) else EnumSet.noneOf(Session.Feature::class.java)
         session = try { Session(activity, features) } catch (e: Exception) { return "ARCore session failed: $e" }
+        // Anything failing after this point (configure, encoder, blobs) must not leak the Session.
+        return try { setup(); null } catch (e: Exception) { release(); "ARCore setup failed: $e" }
+    }
 
+    private fun setup() {
         // ---- choose the camera config: largest CPU image, 30 fps, prefer a hardware depth sensor
         val filter = CameraConfigFilter(session).setFacingDirection(CameraConfig.FacingDirection.BACK)
         val all = session.getSupportedCameraConfigs(filter)
@@ -210,16 +225,44 @@ class ArRecorder(
         view.setEGLConfigChooser(8, 8, 8, 8, 16, 0)
         view.setRenderer(this)
         view.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-        return null
     }
 
     private fun bitrateFor(w: Int, h: Int) = (w * h * 30 * 0.25).toInt().coerceIn(8_000_000, 120_000_000)
 
     fun start() {
-        recording = true
         // SharedCamera: the camera is opened from onSurfaceCreated, once ARCore has its texture.
-        if (!opt.hiResStills) session.resume()
+        if (!opt.hiResStills) session.resume()      // may throw (CameraNotAvailableException): the caller releases
+        recording = true
         view.onResume()
+    }
+
+    /**
+     * Tears down a recorder whose [create] or [start] failed (or that never started): nothing is written, the
+     * GL thread is stopped, the encoder and blob files are discarded and the Session is closed. Safe after a
+     * partial [create].
+     */
+    fun release() {
+        if (released) return
+        released = true
+        recording = false
+        try { view.onPause() } catch (_: Exception) {}           // stop the GL thread before touching the session
+        stillTicker?.let { camHandler?.removeCallbacks(it) }
+        try { captureSession?.close() } catch (_: Exception) {}
+        try { camera?.close() } catch (_: Exception) {}
+        try { stillReader?.close() } catch (_: Exception) {}
+        camThread?.quitSafely()
+        encoder?.discard(); encoder = null
+        for (b in listOfNotNull(
+            if (::depthBlob.isInitialized) depthBlob else null, if (::confBlob.isInitialized) confBlob else null,
+            if (::sdepthBlob.isInitialized) sdepthBlob else null, if (::conf255Blob.isInitialized) conf255Blob else null)) {
+            try { b.close() } catch (_: Exception) {}
+        }
+        try { fusion.close() } catch (_: Exception) {}
+        if (::session.isInitialized) {
+            try { if (opt.arcoreMp4) session.stopRecording() } catch (_: Exception) {}
+            try { session.pause() } catch (_: Exception) {}
+            try { session.close() } catch (_: Exception) {}
+        }
     }
 
     fun stop() {
@@ -231,6 +274,8 @@ class ArRecorder(
         session.pause()
         try { captureSession?.close() } catch (_: Exception) {}
         camera?.close()
+        // A still already in flight must not reach the listener once the reader is closed (IllegalStateException).
+        stillReader?.setOnImageAvailableListener(null, null)
         stillReader?.close()
         camThread?.quitSafely()
         encoder?.stop()
@@ -242,6 +287,9 @@ class ArRecorder(
                 put("width", w); put("height", h); put("unit", "mm"); put("dtype", "uint16"); put("compression", "raw-deflate")
                 put("source", "ARCore raw depth (acquireRawDepthImage16Bits); depth_smooth = acquireDepthImage16Bits")
                 put("confidence", "conf.zlib.bin = ARCore raw confidence quantised 0..84->0, 85..169->1, 170..255->2; full 0..255 in extras/conf255.zlib.bin (range 'c255' in extras/arcore_frames.jsonl)")
+                put("dK_note", "ARCore depth covers the field of view of the camera texture (K_tex in extras/arcore_frames.jsonl), " +
+                    "not necessarily of the CPU image: each frames.jsonl line with depth carries dK = [fx, fy, cx, cy] of the " +
+                    "depth map at dw x dh (texture intrinsics scaled). Prefer dK over K * dw / w; map depth to RGB pixels through dK and K.")
             })
         }
         s.meta.put("counts", JSONObject().apply {
@@ -332,11 +380,19 @@ class ArRecorder(
             frame.acquireCameraImage().use { img ->
                 o.put("t_image", img.timestamp / 1e9)
                 inVideo = encoder?.encodeYuv(img, tNs) == true
-                // small RGB at depth resolution for colouring the TSDF (~3 times a second is plenty)
+                // small RGB at depth resolution for colouring the TSDF (~3 times a second is plenty): the depth map
+                // covers the texture FOV, so each depth pixel is mapped to its CPU-image pixel through both
+                // intrinsics (an affine crop/resample, computed once per frame) instead of resampling the whole image
                 if (frameIdx % 10 == 0) try {
                     val (dw, dh) = depthDims ?: Pair(160, 120)
                     val y = img.planes[0]; val u = img.planes[1]; val v = img.planes[2]
-                    latestRgb = YuvSampler.sample(y.buffer, y.rowStride, y.pixelStride, u.buffer, v.buffer, u.rowStride, u.pixelStride,
+                    val kt = lastKTex; val ki = lastK
+                    latestRgb = if (kt[4] > 0f && ki[4] > 0f) {
+                        val dK = DepthIntrinsics.scale(kt, kt[4].toInt(), kt[5].toInt(), dw, dh)
+                        val imgK = DepthIntrinsics.scale(ki, ki[4].toInt(), ki[5].toInt(), img.width, img.height)
+                        DepthIntrinsics.sampleYuv(y.buffer, y.rowStride, y.pixelStride, u.buffer, v.buffer, u.rowStride, u.pixelStride,
+                            img.width, img.height, dw, dh, DepthIntrinsics.affine(dK, imgK))
+                    } else YuvSampler.sample(y.buffer, y.rowStride, y.pixelStride, u.buffer, v.buffer, u.rowStride, u.pixelStride,
                         img.width, img.height, dw, dh)
                     latestRgbT = tNs; latestRgbW = dw; latestRgbH = dh
                 } catch (_: Exception) {}
@@ -371,6 +427,8 @@ class ArRecorder(
         cam.textureIntrinsics.let { t ->
             o.put("K_tex", JSONArray(listOf(t.focalLength[0].toDouble(), t.focalLength[1].toDouble(),
                 t.principalPoint[0].toDouble(), t.principalPoint[1].toDouble(), t.imageDimensions[0], t.imageDimensions[1])))
+            lastKTex = floatArrayOf(t.focalLength[0], t.focalLength[1], t.principalPoint[0], t.principalPoint[1],
+                t.imageDimensions[0].toFloat(), t.imageDimensions[1].toFloat())
         }
         val proj = FloatArray(16)
         cam.getProjectionMatrix(proj, 0, 0.01f, 100f)
@@ -381,17 +439,33 @@ class ArRecorder(
         if (frameIdx % 10 == 0) pointCloud(frame, o)
         if (frameIdx % 90 == 0) dumpPlanes()
         if (opt.geospatial) geo(o)
-        poseByT[tNs] = Pair(T, JSONObject().put("K", K).put("w", kw).put("h", kh).put("track", track))
+        if (opt.hiResStills) {
+            poseByT[tNs] = PoseRec(FloatArray(16).also { cam.pose.toMatrix(it, 0) }, floatArrayOf(k.focalLength[0], k.focalLength[1], k.principalPoint[0], k.principalPoint[1]), kw, kh, track)
+            poseOrder.addLast(tNs)
+            // Stills older than 1 s have certainly had their ARCore frame: pose them now, then forget frames older than 2 s.
+            while (true) {
+                val st = stillIndex.peek() ?: break
+                if (tNs - st.first < 1_000_000_000L) break
+                stillIndex.poll()
+                writeStillJson(st.first, st.second)
+            }
+            while (poseOrder.isNotEmpty() && tNs - poseOrder.first() > 2_000_000_000L) poseByT.remove(poseOrder.removeFirst())
+        }
 
         if (inVideo) {
-            // FORMAT.md frames.jsonl line (one per video sample, in video order)
+            // FORMAT.md frames.jsonl line (one per video sample, in video order). The sample is already in the
+            // video, so whatever happens here the index must advance and a line must be written, or every later
+            // "i" points at the wrong image.
             val line = JSONObject().apply {
                 put("i", videoIdx); put("t", tNs / 1e9); put("w", kw); put("h", kh); put("K", K); put("T", T); put("track", track)
-                o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { put("exp", it / 1e9) }
-                if (o.has("iso")) put("iso", o.getInt("iso"))
-                o.optJSONObject("light")?.let { l -> put("amb", l.getJSONArray("main_intensity").let { (it.getDouble(0) + it.getDouble(1) + it.getDouble(2)) / 3 }) }
                 put("d", JSONObject.NULL); put("c", JSONObject.NULL)
             }
+            try {
+                o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { line.put("exp", it / 1e9) }
+                if (o.has("iso")) line.put("iso", o.getInt("iso"))
+                // ARCore HDR main-light intensity (linear, unitless), averaged over RGB; not the ARKit lumens of FORMAT.md
+                o.optJSONObject("light")?.let { l -> JsonSafe.put(line, "amb", l.getJSONArray("main_intensity").let { (it.getDouble(0) + it.getDouble(1) + it.getDouble(2)) / 3 }) }
+            } catch (e: Exception) { Log.w(TAG, "frame line extras", e) }
             o.put("i", videoIdx)
             pending.addLast(Pair(tNs, line))
             videoIdx++
@@ -457,9 +531,13 @@ class ArRecorder(
                             rd.put("c", cr)
                         }
                     } catch (_: Exception) {}
+                    depthK(d.width, d.height)?.let { rd.put("dK", it) }
                     o.put("raw_depth", rd)
                     depthDims = Pair(d.width, d.height)
-                    lineFor(d.timestamp)?.apply { put("d", dr); put("c", cr ?: JSONObject.NULL); put("dw", d.width); put("dh", d.height) }
+                    lineFor(d.timestamp)?.apply {
+                        put("d", dr); put("c", cr ?: JSONObject.NULL); put("dw", d.width); put("dh", d.height)
+                        depthK(d.width, d.height)?.let { put("dK", it) }
+                    }
                     rawDepthCount++
                     rawSub = Triple(DepthFilter.shortsLE(rawBytes, d.width * d.height), d.width, d.height)
                 }
@@ -474,7 +552,10 @@ class ArRecorder(
                     val r = sdepthBlob.append(smBytes)
                     smSub = Triple(DepthFilter.shortsLE(smBytes, d.width * d.height), d.width, d.height)
                     o.put("smooth_depth", JSONObject().apply { put("t", d.timestamp / 1e9); put("sd", r); put("w", d.width); put("h", d.height) })
-                    lineFor(d.timestamp)?.apply { put("sd", r); if (!has("dw")) { put("dw", d.width); put("dh", d.height) } }
+                    lineFor(d.timestamp)?.apply {
+                        put("sd", r)
+                        if (!has("dw")) { put("dw", d.width); put("dh", d.height); depthK(d.width, d.height)?.let { put("dK", it) } }
+                    }
                     depthCount++
                 }
             }
@@ -497,9 +578,20 @@ class ArRecorder(
     /** Newest smoothed depth, attached to the next raw-depth submission (occupancy uses the dense map). */
     private var pendingSmooth: Triple<ShortArray, Int, Int>? = null
 
-    /** Depth map(s) + pose of this frame -> DepthFusion (filter, occupancy, TSDF) on its worker thread. */
+    /** Intrinsics of a [dw] x [dh] depth map (texture intrinsics scaled), as the frames.jsonl "dK"; null before the first frame. */
+    private fun depthK(dw: Int, dh: Int): JSONArray? {
+        val kt = lastKTex
+        if (kt[4] <= 0f) return null
+        val k = DepthIntrinsics.scale(kt, kt[4].toInt(), kt[5].toInt(), dw, dh)
+        return JSONArray(listOf(k[0].toDouble(), k[1].toDouble(), k[2].toDouble(), k[3].toDouble()))
+    }
+
+    /**
+     * Depth map(s) + pose of this frame -> DepthFusion (filter, occupancy, TSDF) on its worker thread. The
+     * texture intrinsics go with the texture size: DepthFusion scales them to each depth map itself.
+     */
     private fun submitDepth(frame: Frame, raw: ShortArray?, conf: ByteArray?, rw: Int, rh: Int, smooth: ShortArray?, sw: Int, sh: Int) {
-        val k = lastK
+        val k = lastKTex
         if (k[4] <= 0f) return
         val m = FloatArray(16)
         frame.camera.pose.toMatrix(m, 0)
@@ -582,21 +674,22 @@ class ArRecorder(
 
     private fun dumpPlanesFinal() = s.text("planes.json", planesJson().toString(1))
 
+    /** hires/<still>.json: the still's pose + intrinsics from the ARCore frame with the same timestamp (T null if none). */
+    private fun writeStillJson(t: Long, rel: String) {
+        val o = JSONObject().put("t", t / 1e9).put("file", rel)
+        poseByT[t]?.let { p ->
+            val sw = stillW; val sh = stillH
+            val sc = if (p.w > 0 && sw > 0) sw.toDouble() / p.w else 1.0
+            o.put("w", sw).put("h", sh).put("T", SessionWriter.mat4RowMajorFromColumnMajor(p.m)).put("track", p.track)
+            o.put("K", JSONArray((0 until 4).map { p.K[it].toDouble() * sc }))
+            o.put("K_note", "ARCore CPU-image K scaled by width ratio; valid when the still has the same aspect/crop")
+        } ?: o.put("T", JSONObject.NULL)
+        s.text(rel.removeSuffix(".jpg") + ".json", o.toString(1))
+    }
+
+    /** At stop (GL thread already paused): the stills of the last second that [record] has not posed yet. */
     private fun writeStillJsons() {
-        val idx = stillIndex.toList()
-        val stillMeta = s.meta.optJSONObject("android")?.optJSONObject("stills")
-        for ((t, rel) in idx) {
-            val o = JSONObject().put("t", t / 1e9).put("file", rel)
-            poseByT[t]?.let { (T, k) ->
-                val sw = stillMeta?.optInt("width") ?: 0; val sh = stillMeta?.optInt("height") ?: 0
-                val kw = k.getInt("w"); val K = k.getJSONArray("K")
-                val sc = if (kw > 0 && sw > 0) sw.toDouble() / kw else 1.0
-                o.put("w", sw).put("h", sh).put("T", T).put("track", k.getString("track"))
-                o.put("K", JSONArray((0 until 4).map { K.getDouble(it) * sc }))
-                o.put("K_note", "ARCore CPU-image K scaled by width ratio; valid when the still has the same aspect/crop")
-            } ?: o.put("T", JSONObject.NULL)
-            s.text(rel.removeSuffix(".jpg") + ".json", o.toString(1))
-        }
+        while (true) { val st = stillIndex.poll() ?: break; writeStillJson(st.first, st.second) }
     }
 
     private fun geo(o: JSONObject) {
@@ -628,7 +721,8 @@ class ArRecorder(
         val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3)
         stillReader = reader
         reader.setOnImageAvailableListener({ r ->
-            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            if (!recording) return@setOnImageAvailableListener
+            val img = try { r.acquireLatestImage() } catch (e: IllegalStateException) { null } ?: return@setOnImageAvailableListener
             val ts = img.timestamp
             val nv21 = yuvToNv21(img)
             val w = img.width; val h = img.height
@@ -636,7 +730,7 @@ class ArRecorder(
             stillCount++
             val rel = "hires/hires_%.6f.jpg".format(java.util.Locale.US, ts / 1e9)
             stillIndex.add(Pair(ts, rel))
-            s.submit {
+            s.submit(256) {
                 val bos = ByteArrayOutputStream()
                 YuvImage(nv21, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), 95, bos)
                 s.file(rel).writeBytes(bos.toByteArray())
@@ -644,6 +738,7 @@ class ArRecorder(
 
         }, camHandler)
         sc.setAppSurfaces(camId, listOf(reader.surface))
+        stillW = size.width; stillH = size.height
         s.meta.getJSONObject("android").put("stills", JSONObject().apply {
             put("source", "SharedCamera YUV ${size.width}x${size.height}, same capture request as an ARCore frame -> hires/hires_<t>.jpg + .json")
             put("period_ms", opt.stillPeriodMs)

@@ -88,12 +88,17 @@ axes as ARKit).
 | `c` | [offset, length] or null | same for `conf.zlib.bin` |
 | `sd`, `sc` | [offset, length] or null | smoothed depth / confidence |
 | `dw`, `dh` | int | depth map size (e.g. 256, 192) |
+| `dK` | [fx, fy, cx, cy] | optional (Android): intrinsics of the depth map at dw×dh when they are not `K * dw / w` |
 
 Decode depth in Python: `np.frombuffer(zlib.decompress(blob[o:o+n], -15), '<u2').reshape(dh, dw)`
 (millimetres, 0 = invalid). Confidence uses the same call with `np.uint8`.
 
 The depth map lines up with the RGB frame (same field of view), so its intrinsics are
-`K * dw / w`.
+`K * dw / w`. Exception: ARCore depth covers the field of view of the camera *texture*, which can differ
+from the CPU image's (e.g. a 16:9 texture next to a 4:3 image), so the Android app writes `dK` on every
+line that carries depth. Readers prefer `dK` when present and fall back to `K * dw / w`; a depth pixel maps
+to an RGB pixel through both (`dK` → normalised ray → `K`). The converter's Android reader resamples such
+maps onto the RGB field of view so that the exported depth again obeys `K * dw / w`.
 
 ## Sensor CSVs (header row included; `t` = uptime seconds)
 
@@ -145,6 +150,20 @@ local +Y axis is up, and the box spans `±dims/2` around the origin of `T`.
 Mode C has **no 6-DoF poses**: ARKit can't run while AVFoundation holds several cameras.
 `tools/recover_poses.py` estimates poses offline with structure-from-motion and uses the LiDAR depth
 to set the scale.
+
+## extras/ (Android)
+
+Android-only data that has no place in the layout above goes under `extras/` and is copied verbatim to
+`<out>/extras/android/` by the converter (see `android/README.md` §6 for the full list). Among it:
+
+* `extras/conf255.zlib.bin`: the full 0..255 ARCore raw-depth confidence (per-frame byte ranges in
+  `extras/arcore_frames.jsonl`, key `raw_depth.c255`); `conf.zlib.bin` holds it quantised to 0..2.
+* `extras/recon/`: the on-phone reconstruction (`session.json` `depth_processing`): `mesh.ply` (binary LE
+  TSDF mesh, `x y z nx ny nz` + `uchar red green blue`, triangle faces, no per-face `cls`), `points.ply`
+  (cleaned surface points), `objects.json` (dominant planes and object boxes), `recon.json` (settings and
+  statistics). The converter does **not** read it: it re-fuses from the filtered depth and the poses, so
+  that iOS and Android sessions get the same desktop geometry; the phone mesh stays under
+  `extras/android/recon/`.
 
 ## Other writers (e.g. Android)
 

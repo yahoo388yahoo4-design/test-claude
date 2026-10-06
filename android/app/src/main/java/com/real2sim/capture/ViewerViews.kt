@@ -21,6 +21,7 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.TextureView
+import android.view.ViewConfiguration
 import android.view.View
 import android.widget.FrameLayout
 import androidx.core.graphics.withClip
@@ -361,14 +362,26 @@ class ChartView(ctx: Context) : View(ctx) {
         else -> String.format(Locale.US, "%.3f", v)
     }
 
+    private val gesture = ChartGesture(ViewConfiguration.get(ctx).scaledTouchSlop.toFloat())
+
+    /**
+     * Intercept is not disallowed on DOWN, so the enclosing ScrollView claims a mostly vertical drag itself (we then
+     * get ACTION_CANCEL); the chart only takes over for a mostly horizontal drag, and a plain tap seeks on UP.
+     */
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val cb = onSeek ?: return false
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { parent?.requestDisallowInterceptTouchEvent(true); seekTo(e.x, cb) }
-            MotionEvent.ACTION_MOVE -> seekTo(e.x, cb)
-            MotionEvent.ACTION_UP -> { performClick(); parent?.requestDisallowInterceptTouchEvent(false) }
-            MotionEvent.ACTION_CANCEL -> parent?.requestDisallowInterceptTouchEvent(false)
+            MotionEvent.ACTION_DOWN -> gesture.down(e.x, e.y)
+            MotionEvent.ACTION_MOVE -> {
+                if (gesture.move(e.x, e.y)) parent?.requestDisallowInterceptTouchEvent(true)
+                if (gesture.claimed) seekTo(e.x, cb)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (gesture.up()) seekTo(e.x, cb)
+                performClick(); parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            MotionEvent.ACTION_CANCEL -> { gesture.cancel(); parent?.requestDisallowInterceptTouchEvent(false) }
         }
         return true
     }
@@ -380,6 +393,32 @@ class ChartView(ctx: Context) : View(ctx) {
     }
 
     override fun performClick(): Boolean { super.performClick(); return true }
+}
+
+/**
+ * Touch decision for [ChartView], kept free of View so it is unit-testable: a drag is claimed (seeks) once it
+ * moves more than [slop] and mostly horizontally; otherwise the parent may scroll, and a release without a
+ * claimed drag is a tap.
+ */
+class ChartGesture(private val slop: Float) {
+    private var downX = 0f; private var downY = 0f
+    var claimed = false
+        private set
+
+    fun down(x: Float, y: Float) { downX = x; downY = y; claimed = false }
+
+    /** True on the move that newly claims the gesture (the caller then disallows parent intercept). */
+    fun move(x: Float, y: Float): Boolean {
+        if (claimed) return false
+        val dx = abs(x - downX); val dy = abs(y - downY)
+        if (dx > slop && dx > dy) { claimed = true; return true }
+        return false
+    }
+
+    /** True when the gesture ended as a tap (no claimed drag), i.e. seek once at the release point. */
+    fun up(): Boolean { val tap = !claimed; claimed = false; return tap }
+
+    fun cancel() { claimed = false }
 }
 
 /**

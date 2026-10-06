@@ -4,6 +4,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Same protocol as the iOS app (ios/R2SCapture/Uploader.swift) and tools/receiver.py:
@@ -12,6 +13,32 @@ import java.net.URLEncoder
  * interrupted upload can simply be restarted. A final ".complete" marker closes the session.
  */
 object Uploader {
+    private val runningRef = AtomicReference<File?>(null)
+
+    /** Session folder being uploaded right now, or null. Lives here so it survives SessionsActivity recreation. */
+    val running: File? get() = runningRef.get()
+
+    /** Last progress line, so a recreated SessionsActivity can show the state of an upload already in flight. */
+    @Volatile var lastStatus: String = ""
+
+    /** Progress sink bound by the foreground SessionsActivity (cleared in onPause); called on the upload thread. */
+    @Volatile var listener: ((String) -> Unit)? = null
+
+    /**
+     * Starts uploading [dir] on a background thread; false (and nothing started) when another upload is running.
+     * [work] is the transfer itself (defaults to [upload]); injectable for tests.
+     */
+    fun start(dir: File, base: String, work: (File, String, (String) -> Unit) -> Unit = ::upload): Boolean {
+        if (!runningRef.compareAndSet(null, dir)) return false
+        Thread({
+            try { work(dir, base) { report("${dir.name}: $it") } } catch (e: Exception) { report("upload failed: $e") }
+            finally { runningRef.set(null) }
+        }, "upload").start()
+        return true
+    }
+
+    private fun report(s: String) { lastStatus = s; listener?.invoke(s) }
+
     fun upload(dir: File, baseIn: String, progress: (String) -> Unit) {
         var base = baseIn.trim()
         var token: String? = null

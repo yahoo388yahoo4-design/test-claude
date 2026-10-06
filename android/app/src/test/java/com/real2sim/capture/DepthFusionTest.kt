@@ -370,6 +370,57 @@ class DepthFusionTest {
         assertTrue("filter + integrate ${filterMs + integrateMs} ms", filterMs + integrateMs < 30.0)
     }
 
+    /**
+     * A voxel that collected geometry weight from frames without colour must take its first colour sample
+     * exactly (not averaged against black with the geometry weight).
+     */
+    @Test fun firstColourSampleIsStoredExactly() {
+        val vol = TsdfVolume(TsdfVolume.Config(voxel = 0.03f, minExtractWeight = 1f))
+        val m = lookAt(floatArrayOf(0f, 1f, 0f), floatArrayOf(0f, 1f, -2f))   // looking down -z at a wall 1.5 m ahead
+        val wall = FloatArray(W * H) { 1.5f }
+        // 6 frames without colour: the surface voxels reach a geometry weight well above the colour cap
+        repeat(6) { vol.integrate(wall, W, H, FX, FY, CX, CY, m, null) }
+        val colour = 0x3366CC
+        vol.integrate(wall, W, H, FX, FY, CX, CY, m, IntArray(W * H) { colour })
+        val mesh = vol.extract()
+        assertNotNull(mesh.rgb)
+        val coloured = mesh.rgb!!.filter { it >= 0 }
+        assertTrue("coloured vertices: ${coloured.size} of ${mesh.vertexCount}", coloured.size > mesh.vertexCount / 2)
+        for (c in coloured) assertEquals("vertex colour %06x".format(c), colour, c)
+        // a second, different colour sample is averaged in (running average, not replaced)
+        vol.integrate(wall, W, H, FX, FY, CX, CY, m, IntArray(W * H) { 0x010101 })
+        val c2 = vol.extract().rgb!!.first { it >= 0 }
+        assertTrue("averaged colour %06x".format(c2), (c2 shr 16 and 255) < 0x33 && (c2 shr 16 and 255) > 1)
+    }
+
+    /** submit() from one thread while close() runs: no RejectedExecutionException on either thread. */
+    @Test fun submitRacingCloseNeverThrows() {
+        val errors = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> errors.add(e) }
+        try {
+            val mm = ShortArray(16 * 12) { 1500 }
+            repeat(60) { round ->
+                val fusion = DepthFusion(null, tsdfIntervalMs = 0, liveMeshIntervalMs = Long.MAX_VALUE)
+                val go = java.util.concurrent.CountDownLatch(1)
+                val t = Thread {
+                    go.await()
+                    try {
+                        for (i in 0 until 400) fusion.submit(DepthFusion.Frame(null, null, 0, 0, mm, 16, 12,
+                            floatArrayOf(12f, 12f, 7.5f, 5.5f), 16, 12, poses(3)[1], i.toLong()))
+                    } catch (e: Throwable) { errors.add(e) }
+                }
+                t.start(); go.countDown()
+                Thread.sleep((round % 5).toLong())
+                try { fusion.close() } catch (e: Throwable) { errors.add(e) }
+                t.join(5000)
+                assertTrue(fusion.closed)
+            }
+            Thread.sleep(50)   // let any worker still in its finally block finish
+        } finally { Thread.setDefaultUncaughtExceptionHandler(prev) }
+        assertTrue("exceptions escaped: $errors", errors.isEmpty())
+    }
+
     @Test fun turboDepthColoursAndYuv() {
         val near = DepthViz.color(0.2f, 5f); val far = DepthViz.color(5f, 5f)
         assertTrue((near shr 16 and 255) > (near and 255))      // near: red dominant

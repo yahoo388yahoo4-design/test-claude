@@ -9,9 +9,11 @@
    app), depth_smooth.zlib.bin, extras/conf255.zlib.bin, extras/arcore_frames.jsonl, Android-unit
    sensor logs converted to FORMAT.md units, planes.json, clock.csv, status.csv. ARCore drops depth on
    some frames, so every 7th frame gets none.
-3. Convert with tools/convert.py --from android to ARKitScenes + LiteReality (traj every frame and 10 Hz).
+3. Convert with tools/convert.py --from android --no-depth-filter to ARKitScenes + LiteReality (traj every
+   frame and 10 Hz). The filter is off so the comparison tests the app's depth encoding (raw-deflate uint16
+   LE, dw/dh, byte ranges) bit for bit; the filter itself is covered by tools/depth_filter_test.py.
 4. Compare with the original (poses, intrinsics, RGB, depth, confidence) and run tools/validate.py on
-   the session and on both outputs.
+   the session and on both outputs, and on the multicam smoke session (poses must WARN, not FAIL).
 
   python android_roundtrip.py EPISODE_DIR --tools ../../tools --work /tmp/android_rt
 """
@@ -245,7 +247,7 @@ def main():
     for label, hz in (("every_frame", 0), ("10hz", 10)):
         out = args.work / f"out_{label}"
         convert.main([str(sess), "--from", "android", "--to", "arkitscenes", "litereality", "--out", str(out),
-                      "--video-id", vid, "--traj-hz", str(hz)])
+                      "--video-id", vid, "--traj-hz", str(hz), "--no-depth-filter"])
         conv = out / "arkitscenes" / vid
         r = compare(ep_dir, conv, read_traj, rot_angle_deg, imread_any, imread_rgb)
         lr = out / "litereality" / sess.name
@@ -264,6 +266,14 @@ def main():
         r["validate"] = val
         report[label] = r
     report["multicam_reader_smoke"] = multicam_smoke(sess, args.work / "multicam_session")
+    p = subprocess.run([sys.executable, str(args.tools / "validate.py"), str(args.work / "multicam_session")],
+                       capture_output=True, text=True)
+    try:
+        v = json.loads(p.stdout)
+        report["multicam_reader_smoke"]["validate"] = {"result": v["result"], "exit": p.returncode,
+                                                       "fail_or_warn": [c for c in v["checks"] if c["status"] != "PASS"]}
+    except Exception:
+        report["multicam_reader_smoke"]["validate"] = {"result": "ERROR", "exit": p.returncode, "stderr": p.stderr[-2000:]}
     print(json.dumps(report, indent=1))
     (args.work / "android_roundtrip_report.json").write_text(json.dumps(report, indent=1))
 

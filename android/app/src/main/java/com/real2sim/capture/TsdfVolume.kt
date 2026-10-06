@@ -54,6 +54,8 @@ class TsdfVolume(val cfg: Config = Config()) {
     private val tsdf = ArrayList<FloatArray>()
     private val weight = ArrayList<FloatArray>()
     private val rgb = ArrayList<ByteArray?>()
+    /** Per-block colour weight (samples that contributed colour, capped at [MAX_COLOR_WEIGHT]); allocated with [rgb]. */
+    private val cweight = ArrayList<FloatArray?>()
     private var stamp = IntArray(1024)
     private var dirty = BooleanArray(1024)
     private var frame = 0
@@ -62,7 +64,7 @@ class TsdfVolume(val cfg: Config = Config()) {
     val blockCount get() = tsdf.size
     var full = false; private set
     var integratedFrames = 0; private set
-    val bytesUsed: Long get() = tsdf.size.toLong() * BV * 8 + rgb.count { it != null } * BV * 3L
+    val bytesUsed: Long get() = tsdf.size.toLong() * BV * 8 + rgb.count { it != null } * BV * 7L   // rgb 3 B + colour weight 4 B
 
     fun blockIndex(bx: Int, by: Int, bz: Int): Int = index.get(MeshOps.key(bx, by, bz))
 
@@ -74,7 +76,7 @@ class TsdfVolume(val cfg: Config = Config()) {
         val n = tsdf.size
         index.put(k, n)
         coords.add(bx); coords.add(by); coords.add(bz)
-        tsdf.add(FloatArray(BV) { 1f }); weight.add(FloatArray(BV)); rgb.add(null)
+        tsdf.add(FloatArray(BV) { 1f }); weight.add(FloatArray(BV)); rgb.add(null); cweight.add(null)
         if (n >= stamp.size) { stamp = stamp.copyOf(stamp.size * 2); dirty = dirty.copyOf(dirty.size * 2) }
         stamp[n] = 0; dirty[n] = false
         return n
@@ -134,7 +136,7 @@ class TsdfVolume(val cfg: Config = Config()) {
         for (q in 0 until touched.size) {
             val b = touched.a[q]
             val T = tsdf[b]; val W = weight[b]
-            var C = this.rgb[b]
+            var C = this.rgb[b]; var CW = cweight[b]
             val gx0 = coords.a[b * 3] * B; val gy0 = coords.a[b * 3 + 1] * B; val gz0 = coords.a[b * 3 + 2] * B
             var updated = false
             for (lz in 0 until B) {
@@ -162,14 +164,17 @@ class TsdfVolume(val cfg: Config = Config()) {
                         T[i] = (T[i] * w0 + obs * wo) / w1
                         W[i] = min(w1, maxW)
                         if (useColor && abs(sdf) < trunc * 0.5f) {
-                            if (C == null) { C = ByteArray(BV * 3); this.rgb[b] = C }
+                            if (C == null) { C = ByteArray(BV * 3); this.rgb[b] = C; CW = FloatArray(BV); cweight[b] = CW }
                             val c = rgb!![pi]
-                            val wc = min(w0, 8f)
+                            // colour has its own weight: the first sample is stored exactly (the geometry weight
+                            // may already be high from frames that saw the voxel without colouring it)
+                            val wc = CW!![i]
                             val k = i * 3
                             val f0 = wc / (wc + wo); val f1 = wo / (wc + wo)
                             C[k] = ((C[k].toInt() and 255) * f0 + (c shr 16 and 255) * f1 + 0.5f).toInt().toByte()
                             C[k + 1] = ((C[k + 1].toInt() and 255) * f0 + (c shr 8 and 255) * f1 + 0.5f).toInt().toByte()
                             C[k + 2] = ((C[k + 2].toInt() and 255) * f0 + (c and 255) * f1 + 0.5f).toInt().toByte()
+                            CW[i] = min(wc + wo, MAX_COLOR_WEIGHT)
                         }
                         updated = true
                     }
@@ -296,12 +301,14 @@ class TsdfVolume(val cfg: Config = Config()) {
     }
 
     fun clear() {
-        index.clear(); coords.size = 0; tsdf.clear(); weight.clear(); rgb.clear(); touched.size = 0; full = false; integratedFrames = 0
+        index.clear(); coords.size = 0; tsdf.clear(); weight.clear(); rgb.clear(); cweight.clear(); touched.size = 0; full = false; integratedFrames = 0
     }
 
     companion object {
         const val B = 8
         const val BV = B * B * B
+        /** Cap of the per-voxel colour weight (running average over at most this many samples). */
+        const val MAX_COLOR_WEIGHT = 8f
 
         private fun rgbAt(c: ByteArray, i: Int): Int {
             val r = c[i * 3].toInt() and 255; val g = c[i * 3 + 1].toInt() and 255; val b = c[i * 3 + 2].toInt() and 255

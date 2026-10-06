@@ -99,9 +99,16 @@ class SessionWriter(context: Context, val mode: String) {
 
     fun file(rel: String): File = File(dir, rel).also { it.parentFile?.mkdirs() }
 
-    /** Queue a write; drops (and counts) work if the IO queue is badly behind, instead of OOMing. */
-    fun submit(maxPending: Int = 256, job: () -> Unit) {
-        if (pending > maxPending) { droppedWrites++; return }
+    /**
+     * Queue a write. Per-sample streams pass a [maxPending] cap: when the IO queue is that far behind
+     * the job is dropped (and counted, with a warning) instead of OOMing. Whole-file writes use no cap.
+     */
+    fun submit(maxPending: Int = Int.MAX_VALUE, job: () -> Unit) {
+        if (pending > maxPending) {
+            droppedWrites++
+            android.util.Log.w("SessionWriter", "dropped write: $pending jobs pending > $maxPending (dropped so far: $droppedWrites)")
+            return
+        }
         synchronized(this) { pending++ }
         io.execute {
             try { job() } catch (e: Exception) { android.util.Log.e("SessionWriter", "write failed", e) }
@@ -117,12 +124,34 @@ class SessionWriter(context: Context, val mode: String) {
         w.write(line); w.write("\n")
     }
 
+    /**
+     * Flush and close the append stream of a [csv] file once every line queued so far is on disk, so
+     * the caller can read the file back. Blocks (up to [timeoutMs]); returns false on timeout, in which
+     * case the file may still be incomplete. A later [csv] call on the same path reopens it (truncating).
+     */
+    fun closeCsv(rel: String, timeoutMs: Long = 30_000): Boolean {
+        val done = java.util.concurrent.CountDownLatch(1)
+        submit { try { open.remove(rel)?.close() } finally { done.countDown() } }
+        val ok = try { done.await(timeoutMs, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { false }
+        if (!ok) android.util.Log.w("SessionWriter", "closeCsv $rel: IO queue still behind after $timeoutMs ms")
+        return ok
+    }
+
+    /** Whole-file write through the IO queue; never dropped. */
     fun text(rel: String, s: String) = submit { file(rel).writeText(s) }
+
+    /**
+     * Whole-file write on the caller's thread, for small session-critical files (cams/<name>.jsonl,
+     * cams/calibration.json): never queued, never dropped, errors logged. Call from a background thread.
+     */
+    fun textNow(rel: String, s: String) {
+        try { file(rel).writeText(s) } catch (e: Exception) { android.util.Log.e("SessionWriter", "write $rel", e) }
+    }
 
     fun bytes(rel: String, b: ByteArray) = submit { file(rel).writeBytes(b) }
 
     /** raw-deflate a buffer into its own file (point clouds etc.). */
-    fun deflateFile(rel: String, data: ByteArray) = submit {
+    fun deflateFile(rel: String, data: ByteArray) = submit(256) {
         DeflaterOutputStream(FileOutputStream(file(rel)), Deflater(1, true)).use { it.write(data) }
     }
 

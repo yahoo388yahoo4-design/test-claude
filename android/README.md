@@ -12,7 +12,8 @@ which produces **ARKitScenes** raw layout and **LiteReality** scan folders. Andr
 * `tools/android_roundtrip.py`: test that fabricates an Android session from an ARKitScenes episode
   and round-trips it through the converter.
 * `../tools/readers/android_reader.py`: the converter's Android reader (auto-detected).
-* `ci/android-capture.yml`: GitHub Actions workflow that builds the debug APK (copy it to `.github/workflows/`).
+* `../.github/workflows/android-capture.yml`: GitHub Actions workflow that builds the debug APK and runs
+  the JVM unit tests (`testDebugUnitTest`), `robot/test_receiver.py` and `tools/depth_filter_test.py`.
 
 > **Verification status (2026-10-04).** The debug APK compiles, and `lintDebug` reports no errors
 > (API-level checks included). The app was **run on Android emulators** (API 30 and 34, ARCore 1.56
@@ -23,6 +24,20 @@ which produces **ARKitScenes** raw layout and **LiteReality** scan folders. Andr
 > 1 new frame every 4 s under software GL), so real tracking, depth, SharedCamera stills, ToF and
 > multi-lens streaming can only be confirmed on the phone. Treat the first capture as a smoke test,
 > and send back `session.json` plus the "Dump cams" output.
+>
+> **Review 2026-10-06 (new UI, PR #7 build).** Driven end to end on an API 34 x86_64 emulator (KVM,
+> SwiftShader): main screen in all three modes, Sessions, the Viewer's five tabs, Nav with its settings
+> sheet and the main Settings sheet, plus rotation of Sessions. No crash, ANR or `crash_logs/` entry.
+> Mode B and mode C record and play back; mode A cannot start on the emulator because `Session()` itself
+> throws `FatalException` with the ARCore 1.56 emulator build (the app falls back to a Camera2 preview and
+> the session is flagged *aborted*). A code review on top found and fixed: ARCore session / MediaCodec /
+> camera leaks when a recording fails to start (the camera then stayed busy until the process died),
+> two `RejectedExecutionException` crashes (depth-fusion worker, Sessions delete + Done), a
+> `ConcurrentModificationException` in the stop summary, `frames.jsonl` / `video.mp4` index drift when a
+> frame's light estimate is NaN, unbounded `poseByT` growth (~100 MB/h), a hi-res-still listener
+> firing on a closed reader, the all-files-access screen covering the permission dialog on every launch,
+> mode C demanding the camera permission, Nav's "Starting ARCore…" shown forever without ARCore, and
+> three Nav settings that were never saved.
 
 ---
 
@@ -240,8 +255,20 @@ Outputs (mode A): `extras/recon/mesh.ply` (binary LE, normals, camera colours or
 `extras/recon/points.ply`, `extras/recon/objects.json`, `extras/recon/recon.json`; `extras/map/points.ply`
 is now the cleaned TSDF surface points (occupancy, trajectory and `map.json` unchanged). Navigation mode
 runs the same filter + fusion for its occupancy grid and live mesh. The converter applies the same
-confidence / flying-pixel rules in numpy (`tools/depth_filter.py`); `--no-depth-filter` keeps the
-recorded depth bit-identical.
+confidence / flying-pixel rules in numpy (`tools/depth_filter.py`): the raw 0..255 confidence from
+`extras/conf255.zlib.bin` is gated at `depth_processing.filter.min_confidence` × 255 (127 for the default
+0.5, exactly the app's `DepthFilter` boundary; the 0..2 levels of `conf.zlib.bin` are only used when the
+full map is missing), the smoothed map is filtered without a confidence gate (the app writes none for it),
+and the exported confidence is zeroed wherever the filter removed depth. `--no-depth-filter` keeps the
+recorded values bit-identical.
+
+**Depth intrinsics.** ARCore depth covers the field of view of the camera *texture*, not of the CPU image
+(the two can differ, e.g. a 16:9 texture next to the 4:3 image we record), so the app hands the texture
+intrinsics to the on-phone fusion and writes `dK` = [fx, fy, cx, cy] of the depth map at `dw`×`dh` on every
+`frames.jsonl` line with depth (`FORMAT.md`; `session.json` `depth.dK_note`). The reader prefers `dK` over
+`K * dw / w` and, when the two disagree, resamples the depth and confidence maps onto the RGB field of view
+(nearest neighbour, rows/columns outside the texture become 0) so that ARKitScenes / LiteReality depth
+obeys their `K * dw / w` convention; `episode.align_depth = False` returns the recorded geometry.
 
 Limits: tuned and tested on synthetic scenes (`DepthFusionTest`: a box on a floor before a wall with
 noise, smeared edges and speckle → every vertex within one voxel, box as its own object), not yet on
@@ -304,9 +331,9 @@ python recover_poses.py /path/to/..._multicam --cam wide_2 --fps 5 --out posed
 | Main camera 50 MP 1" IMX989, 23 mm, OIS | A (ARCore CPU image, best 4:3 config) | `lowres_wide/` 256×192, `.pincam`, (`--wide` full-res, `--vga`) | `frame_XXXXX.jpg` + `.json` (`cameraPoseARFrame`, `intrinsics`) | `video.mp4` (HEVC), `frames.jsonl` (`T`, `K`, `exp`, `iso`, `amb`), `extras/arcore_frames.jsonl` (display pose, texture K, focus/aperture/rolling-shutter skew, HDR light) |
 | Main camera, full-res stills | A + hi-res | `--wide` source | extra frames for texturing | `hires/hires_<t>.jpg/.json`, `extras/hires_capture_results.jsonl` |
 | ARCore 6-DoF tracking (camera + IMU VIO) | A | `lowres_wide.traj` (z-up world, world-to-camera axis-angle) | `cameraPoseARFrame` (y-up ARKit axes) | `frames.jsonl T` |
-| ARCore raw depth + confidence (depth-from-motion) | A | `lowres_depth/` (mm), `confidence/` (0..2) | `depth_XXXXX.png`, `conf_XXXXX.png` | `depth.zlib.bin`, `conf.zlib.bin`, `extras/conf255.zlib.bin` (full 0..255) |
+| ARCore raw depth + confidence (depth-from-motion) | A | `lowres_depth/` (mm), `confidence/` (0..2), filtered and aligned with the RGB frame | `depth_XXXXX.png`, `conf_XXXXX.png` | `depth.zlib.bin`, `conf.zlib.bin`, `extras/conf255.zlib.bin` (full 0..255), `frames.jsonl` `dK` (depth intrinsics) |
 | ARCore smoothed depth | A | with `--smoothed-depth` | with `--smoothed-depth` | `depth_smooth.zlib.bin` |
-| Fused geometry (from depth + poses) | A | `<vid>_3dod_mesh.ply` (converter fuses; ARCore has no mesh) | `textured_output.obj` (fused, vertex-coloured) | – |
+| Fused geometry (from depth + poses) | A | `<vid>_3dod_mesh.ply` (converter fuses from depth + poses; ARCore has no native mesh and the phone TSDF mesh is not read) | `textured_output.obj` (fused, vertex-coloured) | `extras/recon/mesh.ply` + `points.ply` (on-phone TSDF, normals + vertex colours, no per-face `cls`; copied to `extras/android/recon/`, not used by the converter, which re-fuses from depth), `objects.json`, `recon.json` |
 | ARCore planes, feature point cloud | A | – | – | `planes.json`, `extras/planes_timeline.jsonl`, `extras/pointcloud/*.bin` |
 | ARCore Geospatial / VPS | A + key | – | – | `extras/arcore_frames.jsonl` `geo` |
 | ARCore Recording API | A + option | – | – | `extras/arcore_recording.mp4` |
@@ -339,13 +366,17 @@ mkdir -p sdk/cmdline-tools && unzip -q clt.zip -d sdk/cmdline-tools && mv sdk/cm
 export JAVA_HOME=$T/jdk17 ANDROID_HOME=$T/sdk PATH=$T/jdk17/bin:$T/sdk/cmdline-tools/latest/bin:$PATH
 yes | sdkmanager --licenses >/dev/null; sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 # build
-cd capture/android && ./gradlew assembleDebug lintDebug     # -> app/build/outputs/apk/debug/app-debug.apk
+cd android && ./gradlew assembleDebug lintDebug             # -> app/build/outputs/apk/debug/app-debug.apk
+./gradlew testDebugUnitTest                                 # JVM unit tests (Robolectric screenshots included)
 ```
 
 Versions: AGP 8.13.2, Gradle 8.14.3 (wrapper), Kotlin 2.2.20, JDK 17, ARCore 1.56.0. The debug APK is
 about 10.2 MB, so `dist/` holds it as ≤8 MB parts. Rebuild it with
 `cat dist/real2sim-capture-debug.apk.part* > real2sim-capture-debug.apk && sha256sum -c dist/real2sim-capture-debug.apk.sha256`.
-The GitHub Actions workflow (`ci/android-capture.yml`) builds the same APK and uploads it as an artifact.
+The Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) is committed, so
+`./gradlew` works on a fresh clone. The GitHub Actions workflow (`../.github/workflows/android-capture.yml`)
+builds the same APK with it, runs `testDebugUnitTest`, `lintDebug`, `robot/test_receiver.py` and
+`tools/depth_filter_test.py`, and uploads the APK as an artifact.
 
 ## 8. Converter round trip (synthetic Android session)
 
@@ -353,18 +384,21 @@ The GitHub Actions workflow (`ci/android-capture.yml`) builds the same APK and u
 writes it exactly as the app's ARCore mode would. That means HEVC 4:2:0 `video.mp4` + pts file,
 raw-deflate depth, confidence through ARCore's 0..255 scale and the app's quantisation, smoothed
 depth, `extras/arcore_frames.jsonl`, and sensor logs in FORMAT.md units. To mimic ARCore skipping
-depth, **every 7th frame has no depth**. The script then converts with `convert.py` (reader detected:
-`android`) and compares against the original episode:
+depth, **every 7th frame has no depth**. The script then converts with `convert.py --no-depth-filter`
+(reader detected: `android`; the filter is off so the depth / confidence comparison tests the app's
+encoding bit for bit, while the filter itself and the reader's confidence gate, `dK` alignment and
+smoothed-depth handling are covered by `tools/depth_filter_test.py`) and compares against the original
+episode:
 
 | check (traj every frame and 10 Hz runs identical) | result |
 |---|---|
 | poses: traj lines matched / rotation / translation error | 60 / 60, max 2.4e-6°, 1.1e-7 mm |
 | intrinsics (.pincam) max abs error | 0.0 |
 | RGB mean abs error (HEVC 4:2:0 chroma) | 1.45 / 255 (worst frame 1.75) |
-| depth / confidence PNGs bit-identical | 52 / 52 frames that had depth (8 deliberately dropped) |
+| depth / confidence PNGs bit-identical (`--no-depth-filter`) | 52 / 52 frames that had depth (8 deliberately dropped) |
 | LiteReality: frames / json / depth / conf / textured_output.obj / extras/android | 60 / 60 / 52 / 52 / yes / yes |
-| `validate.py` session / arkitscenes / litereality | PASS / PASS / PASS. WARNs: no mesh in session (ARCore has none; converter fuses), depth 52/60 (by design), no 3dod annotation and no room.usdz (no RoomPlan), traj 1.3 Hz (the sample's 60 key frames span 45 s) |
-| multicam reader smoke test (`cams/wide_2.*`, empty frames.jsonl) | detected `android`, 60 unposed frames, video decodes, no depth |
+| `validate.py` session / arkitscenes / litereality | PASS / PASS / PASS. WARNs: no top-level mesh.ply in the session (converter fuses; the phone TSDF mesh stays under extras/android/recon/), depth 52/60 (by design), no 3dod annotation and no room.usdz (no RoomPlan), traj 1.3 Hz (the sample's 60 key frames span 45 s) |
+| multicam reader smoke test (`cams/wide_2.*`, empty frames.jsonl) | detected `android`, 60 unposed frames, video decodes, no depth; `validate.py` exit 0 with "poses" as WARN (multicam has no on-device poses) |
 
 **On the emulator, with the real app** (API 30 image for mode A, API 34 for mode B, since the
 API 30 camera HAL emits negative timestamps that MediaCodec drops):
@@ -377,7 +411,7 @@ API 30 camera HAL emits negative timestamps that MediaCodec drops):
 | mode A tracking / depth | not testable: emulator ARCore stays "initializing" at ~0.25 new frames/s; Depth API unsupported on the emulator |
 | mode B (API 34) | HEVC 1280×960, every video sample joined to its CaptureResult (exposure, ISO, frame duration, rolling-shutter skew, focus, crop, AE/AF/AWB states); `K` from focal length / sensor size when the HAL has no `LENS_INTRINSIC_CALIBRATION` (fix added after this test) |
 | location clock | found as a bug (provider `elapsedRealtimeNanos` was unix time on the emulator), **fixed** with a sanity check |
-| reader + validate.py on these sessions | both auto-detected `android`, video decodes. Mode A PASS; mode B FAIL only on "0 posed" (expected until `recover_poses.py`) |
+| reader + validate.py on these sessions | both auto-detected `android`, video decodes. Mode A PASS; mode B WARN on "0 posed" (multicam sessions have no poses until `recover_poses.py`) |
 
 What these tests do **not** cover: ARCore's real depth quality (depth-from-motion is noisier and
 sparser than LiDAR), real MediaCodec output, and device timing.

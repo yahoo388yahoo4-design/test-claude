@@ -119,6 +119,24 @@ object CameraInfo {
         return out
     }
 
+    /**
+     * Which DEPTH16 camera (if any) may be opened as a SECOND device next to the recording camera
+     * [logical]. Opening [logical] itself, one of its [physicalIds], or a listed id the HAL does not
+     * put in a concurrent set with it would evict the recording. A hidden id (not in [listed]) cannot
+     * be checked against [concurrent] and is allowed as an attempt. Pure; [candidates] in preference order.
+     */
+    fun pickDepthCamera(
+        candidates: List<String>, logical: String, physicalIds: Collection<String>,
+        listed: Set<String>, concurrent: List<Set<String>>, hasConcurrentInfo: Boolean,
+    ): String? = candidates.firstOrNull { id ->
+        when {
+            id == logical || id in physicalIds -> false
+            id !in listed -> true
+            !hasConcurrentInfo -> false
+            else -> concurrent.any { logical in it && id in it }
+        }
+    }
+
     /** The per-frame CaptureResult fields that matter for reconstruction (compact, for frames.jsonl). */
     fun resultFields(r: CaptureResult, o: JSONObject) {
         fun <T> put(name: String, k: CaptureResult.Key<T>) { try { r.get(k)?.let { JsonSafe.put(o, name, toJson(it)) } } catch (_: Exception) {} }

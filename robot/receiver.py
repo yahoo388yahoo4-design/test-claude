@@ -168,9 +168,19 @@ class Robot:
         self.job = None
 
     async def run_timed(self, v, w, duration, seq, send):
+        # Backends whose command only lasts a moment (Neato setmotor = 1 s of travel) set `refresh_s`
+        # and get the same command re-sent at that period until the deadline.
+        refresh = getattr(self.m, "refresh_s", 0) or 0
+        deadline = time.monotonic() + max(0.0, duration)
         try:
             self.drive(v, w)
-            await asyncio.sleep(max(0.0, duration))
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                await asyncio.sleep(min(left, refresh) if refresh else left)
+                if refresh and time.monotonic() < deadline:
+                    self.drive(v, w)
         finally:
             self.drive(0, 0)
         await send({"type": "done", "seq": seq})

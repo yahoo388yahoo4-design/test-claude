@@ -149,7 +149,7 @@ def validate_input(d: Path, r: Report):
     r.add("reader", True, s["source"])
     r.add("frames", len(ep.frames) > 0, f"{len(ep.frames)}")
     posed = [f for f in ep.frames if f.T is not None]
-    r.add("poses", len(posed) > 0.9 * len(ep.frames), f"{len(posed)} posed", warn=(s["source"] == "r2s" and getattr(ep, "mode", "") == "multicam"))
+    r.add("poses", len(posed) > 0.9 * len(ep.frames), f"{len(posed)} posed", warn=(getattr(ep, "mode", "") == "multicam"))   # multicam has no on-device poses
     tracking_bad = sum(1 for f in ep.frames if f.tracking != "normal")
     r.add("tracking normal", tracking_bad < 0.1 * max(1, len(ep.frames)), f"{tracking_bad} frames limited", warn=True)
     ts = np.array([f.t for f in ep.frames])

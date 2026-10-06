@@ -85,6 +85,31 @@ check(out.startswith("testmode on\n"), "sends testmode on first")
 check("getcharger\n" in out, "polls getcharger")
 m.set(0.15, 0.15)
 check("setmotor 150 150 150\n" in fr.read(0.2), "drives with setmotor")
+
+
+async def timed_move():
+    """move 100 cm at 20 cm/s: the 1 s setmotor horizon must be refreshed for the whole 5 s job."""
+    r = receiver.Robot(m, a)
+    done = []
+
+    async def send(obj):
+        done.append(obj)
+    await r.handle({"type": "move", "dist_cm": 100, "speed_cms": 20, "seq": 7}, send)
+    fr.read(0.05)
+    mark = len(fr.got)
+    await asyncio.sleep(1.5)
+    repeats = fr.read(0.05)[mark:].count("setmotor 200 200 200\n")
+    check(repeats >= 10, f"timed move re-sends setmotor every 0.1 s ({repeats} in 1.5 s)")
+    check(not done, "done not sent before the deadline")
+    await r.handle({"type": "stop", "seq": 8}, send)
+    await asyncio.sleep(0.3)
+    mark = len(fr.got)
+    await asyncio.sleep(0.3)
+    tail = fr.read(0.05)
+    last = [l for l in tail.splitlines() if l.startswith("setmotor")][-1]
+    check(last == "setmotor 0 0 0" and "setmotor 200" not in tail[mark:], f"stop ends the refresh ({last!r})")
+
+asyncio.run(timed_move())
 fr.say("GetCharger\r\nLabel,Value\r\nVBattV,14.10\r\n\x1a")
 fr.say("LSIDEBIT,0\r\nLFRONTBIT,1\r\n\x1a")
 time.sleep(0.4)

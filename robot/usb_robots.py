@@ -166,6 +166,8 @@ class _SerialBackend:
 class NeatoMotors(_SerialBackend):
     """Neato XV / Botvac over its USB port (OSSDC robotMode "Neato")."""
 
+    refresh_s = 0.1   # setmotor covers 1 s of travel: receiver.run_timed re-sends it at this period
+
     def __init__(self, args, port=None):
         super().__init__(args, port)
         self.max_mm_s = getattr(args, "neato_max_mm_s", 300.0)
