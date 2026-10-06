@@ -67,6 +67,7 @@
             android:keepScreenOn="true" />
         <activity
             android:name=".SessionsActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="false" />
         <activity
             android:name=".SessionViewerActivity"

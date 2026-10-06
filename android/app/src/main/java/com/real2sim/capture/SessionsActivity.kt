@@ -31,7 +31,6 @@ class SessionsActivity : AppCompatActivity() {
     private lateinit var list: LinearLayout
     private lateinit var status: TextView
     private lateinit var receiver: TextView
-    @Volatile private var uploading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Ui.edgeToEdge(this)
@@ -63,7 +62,15 @@ class SessionsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         showReceiver()
+        // Upload state lives in Uploader so it survives recreation (rotation, Done + reopen): rebind and restore.
+        Uploader.listener = { msg -> runOnUiThread { if (!isDestroyed) setStatus(msg) } }
+        Uploader.lastStatus.takeIf { it.isNotEmpty() }?.let { setStatus(it) }
         refresh()
+    }
+
+    override fun onPause() {
+        Uploader.listener = null
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -96,6 +103,7 @@ class SessionsActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
+        if (isDestroyed || exec.isShutdown) return
         val root = SessionWriter.sessionsRoot(this)
         exec.execute {
             val sessions = try { SessionScan.list(root) } catch (e: Exception) { setStatus("could not list sessions: $e"); emptyList() }
@@ -168,12 +176,7 @@ class SessionsActivity : AppCompatActivity() {
     private fun upload(s: SessionSummary) {
         val base = prefs().getString("upload_url", "").orEmpty().trim()
         if (base.isEmpty()) { setStatus("set the receiver URL (tools/receiver.py) first"); editReceiver(); return }
-        if (uploading) { setStatus("an upload is already running"); return }
-        uploading = true
-        Thread({
-            try { Uploader.upload(s.dir, base) { setStatus("${s.name}: $it") } } catch (e: Exception) { setStatus("upload failed: $e") }
-            finally { uploading = false }
-        }, "upload").start()
+        if (!Uploader.start(s.dir, base)) setStatus("an upload is already running")
     }
 
     private fun confirmDelete(s: SessionSummary) {
@@ -185,7 +188,7 @@ class SessionsActivity : AppCompatActivity() {
                 exec.execute {
                     val ok = deleteDir(s.dir)
                     setStatus(if (ok) "deleted ${s.name}" else "could not delete everything in ${s.name}")
-                    runOnUiThread { refresh() }
+                    runOnUiThread { if (!isDestroyed) refresh() }
                 }
             }
             .show()

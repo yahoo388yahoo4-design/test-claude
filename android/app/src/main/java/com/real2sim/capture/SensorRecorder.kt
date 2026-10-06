@@ -11,7 +11,6 @@ import android.hardware.SensorManager
 import android.location.GnssMeasurementsEvent
 import android.location.GnssStatus
 import android.location.Location
-import android.location.LocationListener
 import android.location.LocationManager
 import android.location.OnNmeaMessageListener
 import android.media.MediaRecorder
@@ -21,6 +20,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.PowerManager
 import android.os.SystemClock
+import androidx.core.location.LocationListenerCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executor
@@ -145,22 +145,26 @@ class SensorRecorder(private val ctx: Context, private val s: SessionWriter) : S
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
 
     // ---------------------------------------------------------------- location / GNSS
-    private val locListener = LocationListener { loc: Location ->
-        // FORMAT.md: t, unix, lat, lon, alt, ellipsoidal_alt, hacc, vacc, speed, speed_acc, course, course_acc, floor, simulated
-        // Some providers (seen on the emulator) fill elapsedRealtimeNanos with unix time: fall back to now.
-        val now = SystemClock.elapsedRealtimeNanos()
-        val t = (if (loc.elapsedRealtimeNanos > 0 && kotlin.math.abs(loc.elapsedRealtimeNanos - now) < 3_600_000_000_000L) loc.elapsedRealtimeNanos else now) / 1e9
-        fun f(has: Boolean, v: Number) = if (has) v.toString() else ""
-        val msl = if (Build.VERSION.SDK_INT >= 34 && loc.hasMslAltitude()) loc.mslAltitudeMeters.toString() else ""
-        val line = listOf(
-            "%.9f".format(java.util.Locale.US, t), "%.3f".format(java.util.Locale.US, loc.time / 1000.0), loc.latitude, loc.longitude,
-            msl, f(loc.hasAltitude(), loc.altitude), f(loc.hasAccuracy(), loc.accuracy), f(loc.hasVerticalAccuracy(), loc.verticalAccuracyMeters),
-            f(loc.hasSpeed(), loc.speed), f(loc.hasSpeedAccuracy(), loc.speedAccuracyMetersPerSecond),
-            f(loc.hasBearing(), loc.bearing), f(loc.hasBearingAccuracy(), loc.bearingAccuracyDegrees), "",
-            if (Build.VERSION.SDK_INT >= 31) loc.isMock else false,
-        ).joinToString(",")
-        s.csv("location.csv", "t,unix,lat,lon,alt,ellipsoidal_alt,hacc,vacc,speed,speed_acc,course,course_acc,floor,simulated", line)
-        s.csv("extras/location_providers.csv", "t,provider", "%.9f,%s".format(java.util.Locale.US, t, loc.provider))
+    // LocationListenerCompat (not a SAM lambda): on API 29 onProviderEnabled/Disabled/onStatusChanged are still
+    // abstract in the platform interface, so a lambda-generated class would throw AbstractMethodError on toggle.
+    private val locListener = object : LocationListenerCompat {
+        override fun onLocationChanged(loc: Location) {
+            // FORMAT.md: t, unix, lat, lon, alt, ellipsoidal_alt, hacc, vacc, speed, speed_acc, course, course_acc, floor, simulated
+            // Some providers (seen on the emulator) fill elapsedRealtimeNanos with unix time: fall back to now.
+            val now = SystemClock.elapsedRealtimeNanos()
+            val t = (if (loc.elapsedRealtimeNanos > 0 && kotlin.math.abs(loc.elapsedRealtimeNanos - now) < 3_600_000_000_000L) loc.elapsedRealtimeNanos else now) / 1e9
+            fun f(has: Boolean, v: Number) = if (has) v.toString() else ""
+            val msl = if (Build.VERSION.SDK_INT >= 34 && loc.hasMslAltitude()) loc.mslAltitudeMeters.toString() else ""
+            val line = listOf(
+                "%.9f".format(java.util.Locale.US, t), "%.3f".format(java.util.Locale.US, loc.time / 1000.0), loc.latitude, loc.longitude,
+                msl, f(loc.hasAltitude(), loc.altitude), f(loc.hasAccuracy(), loc.accuracy), f(loc.hasVerticalAccuracy(), loc.verticalAccuracyMeters),
+                f(loc.hasSpeed(), loc.speed), f(loc.hasSpeedAccuracy(), loc.speedAccuracyMetersPerSecond),
+                f(loc.hasBearing(), loc.bearing), f(loc.hasBearingAccuracy(), loc.bearingAccuracyDegrees), "",
+                if (Build.VERSION.SDK_INT >= 31) loc.isMock else false,
+            ).joinToString(",")
+            s.csv("location.csv", "t,unix,lat,lon,alt,ellipsoidal_alt,hacc,vacc,speed,speed_acc,course,course_acc,floor,simulated", line)
+            s.csv("extras/location_providers.csv", "t,provider", "%.9f,%s".format(java.util.Locale.US, t, loc.provider))
+        }
     }
 
     private val gnssCb = object : GnssMeasurementsEvent.Callback() {
