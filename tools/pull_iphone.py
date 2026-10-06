@@ -10,7 +10,8 @@
 Steps for each session that is new on this computer:
   1. copy   the phone's Documents/sessions/<session> -> ~/captures/<session>
   2. convert  tools/convert.py -> ~/converted/<session>/ (ARKitScenes + LiteReality)
-  3. publish  rsync to fleet-3090 /root/real2sim-claude/work/incoming/<session>, then on fleet-3090 run
+  3. publish  rsync (or tar over ssh if rsync is missing) the raw session to fleet-3090
+             /data/datasets/r2s-captures/raw/<space>/<session>, then on fleet-3090 run
              tools/hub_export.py into /data/datasets/r2s-captures with --space, and tools/hub_align.py
              for that space so captures of one room share one frame. The hub picks it up without a restart.
 
@@ -28,14 +29,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REMOTE_ROOT = "/root/real2sim-claude"          # fleet-3090 house rule: work only here (plus the hub folder)
+REMOTE_ROOT = "/root/real2sim-claude"
+PUBLISHED = ".published.json"                  # marker in ~/captures/<session> after a successful publish          # fleet-3090 house rule: work only here (plus the hub folder)
 
 try:
     from pymobiledevice3.exceptions import AfcFileNotFoundError
@@ -111,6 +115,7 @@ async def run(a) -> int:
 
     dest = Path(a.dest).expanduser()
     new_sessions: list[Path] = []
+    ready: list[Path] = []      # complete and fully copied (new or from an earlier run)
     async with await HouseArrestService.create(lockdown=lockdown, bundle_id=bundle, documents_only=True) as afc:
         root = await sessions_root(afc)
         names = sorted(n for n in await afc.listdir(root) if n not in (".", ".."))
@@ -141,10 +146,12 @@ async def run(a) -> int:
                 continue
             if not todo:
                 print(f"  {n}: already copied")
+                ready.append(local)
                 continue
             print(f"  {n}: {len(todo)} files, {human(sum(s for _, s in todo))}")
             t0 = time.time()
             done = 0
+            ok = True
             for p, s in todo:
                 target = local / p
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -153,33 +160,56 @@ async def run(a) -> int:
                 if tmp.stat().st_size != s:
                     tmp.unlink(missing_ok=True)
                     print(f"    size mismatch on {p}; run again to retry")
+                    ok = False
                     continue
                 tmp.replace(target)
                 done += s
                 rate = done / max(time.time() - t0, 1e-3)
                 print(f"    {p}  ({human(done)} at {human(rate)}/s)", flush=True)
-            new_sessions.append(local)
+            if ok:
+                new_sessions.append(local)
+                ready.append(local)
 
     if a.list:
         return 0
     print(f"Copied {len(new_sessions)} session(s) to {dest}")
-    if not new_sessions:
-        return 0
     failed = 0
     if not a.no_convert:
         out = Path(a.convert).expanduser()
-        for s in new_sessions:
+        # new sessions, plus earlier ones that were never converted
+        for s in [s for s in ready if s in new_sessions or not (out / s.name).exists()]:
+            if local_mode(s) == "multicam":
+                # No ARKit poses in multicam; ARKitScenes/LiteReality need them (recover_poses.py first).
+                print(f"Skipping convert for {s.name}: multicam has no camera poses "
+                      f"(run tools/recover_poses.py on it first if you need ARKitScenes/LiteReality)")
+                continue
             print(f"Converting {s.name} -> {out / s.name}")
             r = subprocess.run([sys.executable, str(HERE / "convert.py"), str(s), "--out", str(out / s.name)])
             if r.returncode != 0:
                 failed += 1
                 print(f"  convert.py failed for {s.name} (exit {r.returncode})")
     if not a.no_publish:
-        failed += publish(new_sessions, a)
+        # new sessions, plus earlier ones whose publish never finished (no marker)
+        todo = [s for s in ready if s in new_sessions or not (s / PUBLISHED).exists()]
+        if todo:
+            failed += publish(todo, a)
+        else:
+            print("Nothing new to publish.")
     return 1 if failed else 0
 
 
 # MARK: publish to the datasets hub on fleet-3090
+
+def local_mode(session: Path) -> str:
+    try:
+        return json.loads((session / "session.json").read_text()).get("mode", "")
+    except Exception:
+        return ""
+
+
+def mark_published(s: Path, a, note: str = "") -> None:
+    (s / PUBLISHED).write_text(json.dumps({"host": a.host, "hub": a.hub, "space": a.space, "note": note,
+                                           "time": time.strftime("%Y-%m-%dT%H:%M:%S")}))
 
 def ssh_base(a) -> list[str]:
     cmd = ["ssh", "-o", "BatchMode=yes"]
@@ -209,6 +239,28 @@ def align_args(usage: str, hub: str, space: str) -> list[str]:
     return args
 
 
+def copy_to_remote(a, src: Path, dst: str, use_rsync: bool) -> bool:
+    mk = remote(a, f"mkdir -p {shlex.quote(dst)}", capture=True)
+    if mk.returncode != 0:
+        print(f"  can't create {dst} on {a.host}: {(mk.stderr or mk.stdout).strip()[:200]}")
+        return False
+    if use_rsync:
+        rsh = " ".join(shlex.quote(x) for x in ssh_base(a))
+        r = subprocess.run(["rsync", "-a", "--partial", "--exclude", PUBLISHED, "-e", rsh, f"{src}/", f"{a.host}:{dst}/"])
+        if r.returncode != 0:
+            print(f"  rsync failed (exit {r.returncode})")
+        return r.returncode == 0
+    # tar on this side, untar on the hub side, one ssh stream (no resume, but needs nothing installed).
+    q = shlex.quote(dst)
+    tar = subprocess.Popen(["tar", "-C", str(src), f"--exclude=./{PUBLISHED}", "-cf", "-", "."], stdout=subprocess.PIPE)
+    r = subprocess.run(ssh_base(a) + [a.host, f"mkdir -p {q} && tar -C {q} -xf -"], stdin=tar.stdout)
+    tar.stdout.close()
+    ok = tar.wait() == 0 and r.returncode == 0
+    if not ok:
+        print(f"  tar over ssh failed (tar exit {tar.returncode}, ssh exit {r.returncode})")
+    return ok
+
+
 def publish(sessions: list[Path], a) -> int:
     py = (f"PY=$(ls {REMOTE_ROOT}/.venv/bin/python {REMOTE_ROOT}/venv/bin/python {REMOTE_ROOT}/env/bin/python "
           f"2>/dev/null | head -1); PY=${{PY:-python3}}")
@@ -219,20 +271,39 @@ def publish(sessions: list[Path], a) -> int:
               f"  ssh said: {(check.stderr or check.stdout).strip()[:300]}")
         return 1
     failed = 0
-    incoming = f"{REMOTE_ROOT}/work/incoming"
+    # Raw sessions live inside the dataset, next to the browser exports: <hub>/raw/<space>/<session>
+    incoming = a.raw_dir or f"{a.hub.rstrip('/')}/raw/{a.space}"
+    # rsync needs to be installed on both ends; otherwise stream a tar archive over ssh.
+    use_rsync = shutil.which("rsync") is not None and \
+        remote(a, "command -v rsync", capture=True).returncode == 0
+    if not use_rsync:
+        print(f"  rsync not available on {'this computer' if not shutil.which('rsync') else a.host}; copying with tar over ssh")
+    export_help = remote(a, f"{py}; cd {tools} && $PY hub_export.py --help", capture=True).stdout
     for s in sessions:
+        exported = f"{a.hub.rstrip('/')}/sessions/{s.name}"
+        exists = remote(a, f"test -d {shlex.quote(exported)}", capture=True).returncode == 0
+        if exists and not a.republish:
+            print(f"{s.name}: already on the hub, skipping (use --republish to replace it)")
+            mark_published(s, a, "found on hub")
+            continue
         print(f"Publishing {s.name} to {a.host}:{a.hub} (space {a.space})")
-        rsh = " ".join(shlex.quote(x) for x in ssh_base(a))
-        r = subprocess.run(["rsync", "-a", "--partial", "-e", rsh, f"{s}/", f"{a.host}:{incoming}/{s.name}/"])
-        if r.returncode != 0:
-            print(f"  rsync failed (exit {r.returncode})")
+        if not copy_to_remote(a, s, f"{incoming}/{s.name}", use_rsync):
             failed += 1
             continue
+        extra = ""
+        if exists:   # --republish: hub_export.py refuses to write into an existing session folder
+            flag = next((f for f in ("--overwrite", "--force") if f in export_help), None)
+            if flag:
+                extra = f" {flag}"
+            elif re.fullmatch(r"[\w.-]+", s.name):
+                remote(a, f"rm -rf {shlex.quote(exported)}")   # only this session's previous export
         r = remote(a, f"{py}; cd {tools} && $PY hub_export.py {shlex.quote(f'{incoming}/{s.name}')} "
-                      f"--out {shlex.quote(a.hub)} --space {shlex.quote(a.space)}")
+                      f"--out {shlex.quote(a.hub)} --space {shlex.quote(a.space)}{extra}")
         if r.returncode != 0:
             print(f"  hub_export.py failed (exit {r.returncode})")
             failed += 1
+            continue
+        mark_published(s, a)
     usage = remote(a, f"{py}; cd {tools} && $PY hub_align.py --help", capture=True).stdout
     args = " ".join(shlex.quote(x) for x in align_args(usage, a.hub, a.space))
     print(f"Aligning space {a.space}: hub_align.py {args}")
@@ -257,6 +328,9 @@ def main() -> int:
     ap.add_argument("--host", default="fleet-3090", help="ssh host of the datasets hub (default fleet-3090)")
     ap.add_argument("--ssh-key", help="ssh private key, if ~/.ssh/config doesn't set one for the host")
     ap.add_argument("--hub", default="/data/datasets/r2s-captures", help="dataset folder on the hub host")
+    ap.add_argument("--republish", action="store_true",
+                    help="re-export sessions that are already on the hub (replaces their hub copy)")
+    ap.add_argument("--raw-dir", help="where raw sessions go on the hub host (default HUB/raw/SPACE)")
     ap.add_argument("--list", action="store_true", help="only list the sessions on the phone")
     ap.add_argument("--session", nargs="+", help="copy only these session folder names")
     ap.add_argument("--include-incomplete", action="store_true", help="also copy sessions without complete=true")
