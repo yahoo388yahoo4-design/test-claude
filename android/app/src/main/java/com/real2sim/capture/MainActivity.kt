@@ -213,9 +213,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startRecording() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPerms(); return }
         val s = settings
         val m = s.mode
+        // Sensors-only (mode C) has no camera; the other two need it.
+        if (m != CaptureMode.SENSORS && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPerms(); return }
         stopPreview()      // the recorder needs the camera (ARCore session / CameraDevice) to itself
         val w = SessionWriter(this, m.id)
         writer = w
@@ -229,11 +230,11 @@ class MainActivity : AppCompatActivity() {
                     val r = ArRecorder(this, w, ArOptions(hiResStills = s.hiResStills, arcoreMp4 = s.arcoreMp4,
                         lockFocus = s.lock, geospatial = s.geospatial), ::status)
                     arr = r
-                    r.create()?.let { err -> r.release(); status(err); abort(); return }
+                    r.create()?.let { err -> r.release(); status(err); abort(err); return }
                     previewHost.addView(r.view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                     try { r.start() } catch (e: Exception) {
                         previewHost.removeView(r.view); r.release()
-                        status("AR start failed: $e"); abort(); return
+                        val reason = "AR start failed: $e"; status(reason); abort(reason); return
                     }
                     ar = r
                     addLiveViews(r)
@@ -245,8 +246,8 @@ class MainActivity : AppCompatActivity() {
                     previewHost.addView(r.previewView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, android.view.Gravity.CENTER))
                     val err = try { r.start() } catch (e: Exception) { "camera start failed: $e" }
                     if (err != null) {
-                        previewHost.removeView(r.previewView); try { r.stop() } catch (_: Exception) {}
-                        status(err); abort(); return
+                        previewHost.removeView(r.previewView); try { r.release() } catch (_: Exception) {}
+                        status(err); abort(err); return
                     }
                     cam2 = r
                     val cv = CoverageView(this)
@@ -264,8 +265,10 @@ class MainActivity : AppCompatActivity() {
             mapView?.let { previewHost.removeView(it) }; mapView = null
             coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
             arr?.let { ar = null; previewHost.removeView(it.view); try { it.release() } catch (_: Exception) {} }
-            c2?.let { cam2 = null; previewHost.removeView(it.previewView); try { it.stop() } catch (_: Exception) {} }
-            status("start failed: $e"); abort(); return
+            c2?.let { cam2 = null; previewHost.removeView(it.previewView); try { it.release() } catch (_: Exception) {} }
+            val reason = "start failed: $e"
+            android.util.Log.w("MainActivity", "start ${m.id}: $reason", e)
+            status(reason); abort(reason); return
         }
         @Suppress("DEPRECATION")
         wake = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "capture:rec").apply { acquire(3 * 3600 * 1000L) }
@@ -291,9 +294,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun abort() {
-        sensors?.stop(); sensors = null
-        writer?.finish { put("aborted", true) }; writer = null
+    /** The recorder did not start: close the session (flagged "aborted" with the reason) off the UI thread. */
+    private fun abort(reason: String) {
+        val sn = sensors; val w = writer
+        sensors = null; writer = null
+        // SensorRecorder.stop() and SessionWriter.finish() wait for their threads (2 s / 60 s): never on the UI thread.
+        Thread({
+            try { sn?.stop() } catch (e: Exception) { android.util.Log.w("MainActivity", "abort: sensors", e) }
+            try { w?.finish { put("aborted", true); put("abort_reason", reason) } } catch (e: Exception) { android.util.Log.e("MainActivity", "abort: finish", e) }
+        }, "abort-recording").start()
         if (!notResumed()) startPreview()
     }
 
@@ -311,8 +320,9 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try { r?.stop() } catch (e: Exception) { android.util.Log.e("MainActivity", "ar stop", e) }
             try { c?.stop() } catch (e: Exception) { android.util.Log.e("MainActivity", "cam2 stop", e) }
-            val sum = sn?.summary() ?: ""
+            // counts are final only once the sensor thread has drained (stop() waits for it)
             try { sn?.stop() } catch (_: Exception) {}
+            val sum = sn?.summary() ?: ""
             try { w.finish() } catch (e: Exception) { android.util.Log.e("MainActivity", "finish", e) }
             ui.post {
                 stopping = false

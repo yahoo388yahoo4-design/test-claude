@@ -202,6 +202,8 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         robotHeight = pf("height", robotHeight); vMax = pf("vmax", vMax); wMax = pf("wmax", wMax)
         stopDist = pf("stop", stopDist); slowDist = pf("slow", slowDist); goalTol = pf("goalTol", goalTol)
         closedLoopMoves = prefs.getBoolean("closedLoop", true); haptics = prefs.getBoolean("haptics", true)
+        guide.voice = prefs.getBoolean("voice", true); guide.beeps = prefs.getBoolean("beeps", true)
+        cloud.visible = prefs.getBoolean("cloud", true)
         map.maxObstacleHeight = robotHeight + 0.1f
     }
 
@@ -524,10 +526,10 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 number("Goal tolerance", vals["goal"]!!, "cm") { vals["goal"] = it }
             }
             section("Guidance and display") {
-                toggle("Voice instructions", guide.voice) { guide.voice = it }
-                toggle("Proximity beeps", guide.beeps) { guide.beeps = it }
+                toggle("Voice instructions", guide.voice) { guide.voice = it; prefs.edit().putBoolean("voice", it).apply() }
+                toggle("Proximity beeps", guide.beeps) { guide.beeps = it; prefs.edit().putBoolean("beeps", it).apply() }
                 toggle("Haptics", haptics) { c -> haptics = c; prefs.edit().putBoolean("haptics", c).apply() }
-                toggle("Show 3D points", cloud.visible) { cloud.visible = it }
+                toggle("Show 3D points", cloud.visible) { cloud.visible = it; prefs.edit().putBoolean("cloud", it).apply() }
                 button("Voice assistant settings…") { voice?.showSettings() }
             }
         }
@@ -707,7 +709,7 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             map = MapBuilder().also { it.maxObstacleHeight = robotHeight + 0.1f }
             fusion.close()
             fusion = DepthFusion(map)
-            cloud = PointCloudRenderer(map) { fusion.liveMesh }.also { it.create() }
+            cloud = PointCloudRenderer(map) { fusion.liveMesh }.also { it.visible = prefs.getBoolean("cloud", true); it.create() }
         }
         status("new empty map")
     }
@@ -727,10 +729,23 @@ class NavActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     s.configure(cfg)
                     if (cfg.depthMode == Config.DepthMode.DISABLED) status("this phone has no ARCore Depth API: obstacles come from feature points only")
                 }
-            } catch (e: Exception) { status("ARCore unavailable: $e"); return }
+            } catch (e: Exception) { arFailed("ARCore unavailable: ${e.javaClass.simpleName}", "$e"); return }
         }
-        try { session?.resume() } catch (e: Exception) { status("camera: $e"); return }
+        try { session?.resume() } catch (e: Exception) { arFailed("Camera unavailable: ${e.javaClass.simpleName}", "camera: $e"); return }
         gl.onResume()
+    }
+
+    /**
+     * No tracking will ever come (no ARCore on this device / emulator, camera denied or taken): say so in the
+     * top bar instead of "Starting ARCore…" forever, and keep the robot still (Auto / GO drive on poses).
+     */
+    private fun arFailed(short: String, detail: String) {
+        status(detail)
+        trackDot.background = Ui.oval(Ui.RED)
+        trackText.text = short
+        mapText.text = "no tracking: Auto and GO are off, Manual still works"
+        if (drive == Drive.AUTO) setDrive(Drive.GUIDE)
+        goBtn.isEnabled = false; goBtn.alpha = 0.4f
     }
 
     override fun onPause() {

@@ -38,7 +38,8 @@ class SensorRecorder(private val ctx: Context, private val s: SessionWriter) : S
     private val handler = Handler(thread.looper)
     private val executor = Executor { handler.post(it) }
     private val names = mutableMapOf<Int, String>()
-    private val counts = mutableMapOf<String, Long>()
+    // Written on the sensors thread at ~1 kHz, read by summary() / stop() from the stop thread.
+    private val counts = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private var audio: MediaRecorder? = null
     private var statusTicker: Runnable? = null
 

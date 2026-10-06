@@ -274,6 +274,8 @@ class ArRecorder(
         session.pause()
         try { captureSession?.close() } catch (_: Exception) {}
         camera?.close()
+        // A still already in flight must not reach the listener once the reader is closed (IllegalStateException).
+        stillReader?.setOnImageAvailableListener(null, null)
         stillReader?.close()
         camThread?.quitSafely()
         encoder?.stop()
@@ -451,14 +453,19 @@ class ArRecorder(
         }
 
         if (inVideo) {
-            // FORMAT.md frames.jsonl line (one per video sample, in video order)
+            // FORMAT.md frames.jsonl line (one per video sample, in video order). The sample is already in the
+            // video, so whatever happens here the index must advance and a line must be written, or every later
+            // "i" points at the wrong image.
             val line = JSONObject().apply {
                 put("i", videoIdx); put("t", tNs / 1e9); put("w", kw); put("h", kh); put("K", K); put("T", T); put("track", track)
-                o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { put("exp", it / 1e9) }
-                if (o.has("iso")) put("iso", o.getInt("iso"))
-                o.optJSONObject("light")?.let { l -> put("amb", l.getJSONArray("main_intensity").let { (it.getDouble(0) + it.getDouble(1) + it.getDouble(2)) / 3 }) }
                 put("d", JSONObject.NULL); put("c", JSONObject.NULL)
             }
+            try {
+                o.optLong("exposure_ns", -1).takeIf { it > 0 }?.let { line.put("exp", it / 1e9) }
+                if (o.has("iso")) line.put("iso", o.getInt("iso"))
+                // ARCore HDR main-light intensity (linear, unitless), averaged over RGB; not the ARKit lumens of FORMAT.md
+                o.optJSONObject("light")?.let { l -> JsonSafe.put(line, "amb", l.getJSONArray("main_intensity").let { (it.getDouble(0) + it.getDouble(1) + it.getDouble(2)) / 3 }) }
+            } catch (e: Exception) { Log.w(TAG, "frame line extras", e) }
             o.put("i", videoIdx)
             pending.addLast(Pair(tNs, line))
             videoIdx++
@@ -714,7 +721,8 @@ class ArRecorder(
         val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3)
         stillReader = reader
         reader.setOnImageAvailableListener({ r ->
-            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            if (!recording) return@setOnImageAvailableListener
+            val img = try { r.acquireLatestImage() } catch (e: IllegalStateException) { null } ?: return@setOnImageAvailableListener
             val ts = img.timestamp
             val nv21 = yuvToNv21(img)
             val w = img.width; val h = img.height

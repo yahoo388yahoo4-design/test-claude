@@ -184,11 +184,18 @@ class DepthFusion(
      */
     fun finish(floorY: Float = Float.NaN, timeoutMs: Long = 30_000): Result? {
         if (closed) return null
-        val fut = exec.submit<Result?> {
-            slot.getAndSet(null)?.let { try { process(it) } catch (_: Exception) {} }
-            if (fused == 0) null else buildResult(floorY)
-        }
-        return try { fut.get(timeoutMs, TimeUnit.MILLISECONDS) } catch (e: Exception) { lastError = e.toString(); null } finally { close() }
+        val fut = try {
+            exec.submit<Result?> {
+                slot.getAndSet(null)?.let { try { process(it) } catch (_: Exception) {} }
+                if (fused == 0) null else buildResult(floorY)
+            }
+        } catch (e: java.util.concurrent.RejectedExecutionException) { lastError = e.toString(); close(); return null }
+        return try { fut.get(timeoutMs, TimeUnit.MILLISECONDS) } catch (e: Exception) {
+            lastError = e.toString()
+            // On timeout do not leave the extraction running (CPU + memory) after the UI says "Saved".
+            fut.cancel(true)
+            null
+        } finally { close() }
     }
 
     fun close() { closed = true; slot.set(null); exec.shutdown() }

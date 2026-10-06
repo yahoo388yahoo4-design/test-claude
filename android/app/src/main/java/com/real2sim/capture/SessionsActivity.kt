@@ -103,12 +103,15 @@ class SessionsActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
+        // A delete finishing after Done/rotation posts refresh() to a destroyed activity: the executor is gone.
         if (isDestroyed || exec.isShutdown) return
         val root = SessionWriter.sessionsRoot(this)
-        exec.execute {
-            val sessions = try { SessionScan.list(root) } catch (e: Exception) { setStatus("could not list sessions: $e"); emptyList() }
-            runOnUiThread { if (!isDestroyed) show(sessions) }
-        }
+        try {
+            exec.execute {
+                val sessions = try { SessionScan.list(root) } catch (e: Exception) { setStatus("could not list sessions: $e"); emptyList() }
+                runOnUiThread { if (!isDestroyed) show(sessions) }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {}
     }
 
     private fun show(sessions: List<SessionSummary>) {
@@ -152,6 +155,8 @@ class SessionsActivity : AppCompatActivity() {
         s.frames?.let { parts.add("$it frames") }
         text.addView(Ui.label(this, parts.joinToString(" · "), 13f, Ui.SECONDARY, digits = true).apply { setPadding(0, dp(3), 0, 0) })
         if (!s.complete) text.addView(Ui.label(this, "incomplete (no session.json)", 12f, Ui.ORANGE).apply { setPadding(0, dp(2), 0, 0) })
+        else if (s.aborted != null) text.addView(Ui.label(this, "aborted: ${s.aborted}", 12f, Ui.ORANGE).apply {
+            maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(2), 0, 0) })
         content.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
         content.addView(Ui.icon(this, R.drawable.ic_chevron_right, Ui.TERTIARY, 16))
         content.setOnClickListener { open(s) }
