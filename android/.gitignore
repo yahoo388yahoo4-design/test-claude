@@ -8,3 +8,4 @@ dist/*.bundle*
 *.iml
 dist/*.part*
 .kotlin/
+app/src/main/assets/*.tflite

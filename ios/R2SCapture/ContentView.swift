@@ -215,6 +215,19 @@ struct SettingsView: View {
                     Text("IMU (200 Hz requested), magnetometer, barometer, thermal and battery are always recorded.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Section {
+                    TextField("Room name (e.g. Living room)", text: $model.home.roomName)
+                    TextField("http://homeassistant.local:8123", text: $model.home.haURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Long-lived access token", text: $model.home.haToken)
+                    Toggle("Send each room map to Home Assistant", isOn: $model.home.autoSend)
+                } header: {
+                    Text("Room map + Home Assistant (mode B)")
+                } footer: {
+                    Text("RoomPlan finds walls, doors, windows and objects (TV, toilet, chairs, tables, sofa, bed, …); each scan is saved as roommap/room_map.json and can go to the Real2Sim Home integration in Home Assistant (HOME.md).")
+                }
                 Section("Upload receiver (tools/receiver.py)") {
                     TextField("http://192.168.1.20:8765#token", text: $model.settings.uploadURL)
                         .keyboardType(.URL)
@@ -264,6 +277,9 @@ struct SessionsView: View {
                     .contextMenu {
                         ShareLink(item: url) { Label("Share folder", systemImage: "square.and.arrow.up") }
                         Button { model.upload(url) } label: { Label("Upload to receiver", systemImage: "arrow.up.circle") }
+                        if HomeAssistantClient.hasRoomMap(url) {
+                            Button { model.sendRoomMap(url) } label: { Label("Send room map to Home Assistant", systemImage: "house") }
+                        }
                     }
                 }
             }

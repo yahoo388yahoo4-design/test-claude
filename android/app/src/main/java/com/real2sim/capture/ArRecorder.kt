@@ -52,6 +52,9 @@ data class ArOptions(
     val arcoreMp4: Boolean,        // ARCore Recording API (replayable dataset) alongside our own files
     val lockFocus: Boolean,
     val geospatial: Boolean,
+    /** Room map: object detection + floor / walls -> roommap/room_map.json (RoomScanner). */
+    val roomScan: Boolean = false,
+    val roomName: String = "",
 )
 
 /**
@@ -123,6 +126,12 @@ class ArRecorder(
     private var lastKTex = floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f)
     private var lastPoseM = FloatArray(16)
     private var lastHeading = 0f
+    /** Room mapping (object detector + 3D boxes); created in [setup] when [ArOptions.roomScan]. */
+    var roomScanner: RoomScanner? = null; private set
+    /** Newest smoothed (else raw) depth map in mm for the room scanner: data, width, height. */
+    private var lastScanDepth: Triple<ShortArray, Int, Int>? = null
+    /** Room map JSON written at [stop] (null when room mapping is off or failed). */
+    @Volatile var roomMap: JSONObject? = null; private set
     @Volatile var showCloud = true
         set(v) { field = v; liveView = if (v) 0 else 3 }
 
@@ -202,6 +211,7 @@ class ArRecorder(
             put("timestamp_source", if (chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) "REALTIME" else "UNKNOWN")
         })
         s.text("extras/camera_characteristics_arcore_${cc.cameraId}.json", CameraInfo.characteristics(chars).toString(1))
+        if (opt.roomScan) roomScanner = RoomScanner(activity, chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90)
         val br = bitrateFor(cc.imageSize.width, cc.imageSize.height)
         encoder = VideoEncoder(s.file("video.mp4"), cc.imageSize.width, cc.imageSize.height, cc.fpsRange.upper.coerceAtLeast(30), br, surfaceInput = false)
         s.meta.put("video", JSONObject().apply {
@@ -258,6 +268,7 @@ class ArRecorder(
             try { b.close() } catch (_: Exception) {}
         }
         try { fusion.close() } catch (_: Exception) {}
+        try { roomScanner?.close() } catch (_: Exception) {}
         if (::session.isInitialized) {
             try { if (opt.arcoreMp4) session.stopRecording() } catch (_: Exception) {}
             try { session.pause() } catch (_: Exception) {}
@@ -301,10 +312,13 @@ class ArRecorder(
             put("lock", opt.lockFocus); put("geospatial", opt.geospatial)
         })
         dumpPlanesFinal()
+        val roomPlanes = if (roomScanner != null) try { RoomScanner.planes(session) } catch (e: Exception) { Log.w(TAG, "room planes", e); emptyList() } else emptyList()
         // final TSDF mesh + cleaned points (extras/recon/), settings + stats in session.json
         var clean: FloatArray? = null
+        var recon: DepthFusion.Result? = null
         try {
             val r = fusion.finish(map.floorY)
+            recon = r
             if (r != null) {
                 fusion.writeOutputs(r, s.file("extras/recon/recon.json").parentFile!!)
                 clean = r.points
@@ -320,6 +334,21 @@ class ArRecorder(
             map.save(s.file("extras/map/map.json").parentFile!!, extra, clean)
             map.save(File(SessionWriter.sessionsRoot(activity).parentFile, "maps/${s.id}"), extra, clean)
         } catch (e: Exception) { Log.w(TAG, "map save", e) }
+        roomScanner?.let { rs ->
+            try {
+                rs.close()
+                val objs = rs.fusion.confirmed()
+                val mesh = recon?.mesh
+                val json = RoomScanner.writeRoomMap(s.file("roommap/room_map.json").parentFile!!, opt.roomName, s.id, roomPlanes, map,
+                    objs, mesh, mesh?.let { fusion.vertexColors(it, recon!!.floorY) })
+                roomMap = json
+                s.meta.put("roommap", JSONObject().apply {
+                    put("file", "roommap/room_map.json"); put("name", json.optString("name")); put("objects", objs.size)
+                    put("walls", json.optJSONArray("walls")?.length() ?: 0); put("detector", RoomScanner.MODEL)
+                    put("frames_detected", rs.processed); rs.error?.let { put("error", it) }
+                })
+            } catch (e: Exception) { Log.w(TAG, "room map", e); s.meta.put("roommap", JSONObject().put("error", e.toString())) }
+        }
         session.close()
     }
 
@@ -358,6 +387,7 @@ class ArRecorder(
     }
 
     private var lastFrameTs = -1L
+    private var scanRgb: Triple<IntArray, Int, Int>? = null
     private var repeatedUpdates = 0
 
     private fun record(frame: Frame) {
@@ -380,6 +410,13 @@ class ArRecorder(
             frame.acquireCameraImage().use { img ->
                 o.put("t_image", img.timestamp / 1e9)
                 inVideo = encoder?.encodeYuv(img, tNs) == true
+                val rs = roomScanner
+                if (rs != null && cam.trackingState == TrackingState.TRACKING && lastK[4] > 0f && rs.wants(tNs)) try {
+                    val y = img.planes[0]; val u = img.planes[1]; val v = img.planes[2]
+                    val ow = 640; val oh = (640L * img.height / img.width).toInt()
+                    scanRgb = Triple(YuvSampler.sample(y.buffer, y.rowStride, y.pixelStride, u.buffer, v.buffer, u.rowStride, u.pixelStride,
+                        img.width, img.height, ow, oh), ow, oh)
+                } catch (e: Exception) { Log.w(TAG, "scan rgb", e) }
                 // small RGB at depth resolution for colouring the TSDF (~3 times a second is plenty): the depth map
                 // covers the texture FOV, so each depth pixel is mapped to its CPU-image pixel through both
                 // intrinsics (an affine crop/resample, computed once per frame) instead of resampling the whole image
@@ -471,6 +508,18 @@ class ArRecorder(
             videoIdx++
         }
         depth(frame, o)
+        scanRgb?.let { (rgb, sw, sh) ->
+            scanRgb = null
+            val rs = roomScanner
+            val d = lastScanDepth
+            if (rs != null && cam.trackingState == TrackingState.TRACKING) {
+                val k = DepthIntrinsics.scale(lastK, lastK[4].toInt(), lastK[5].toInt(), sw, sh)
+                val kt = lastKTex
+                val kd = if (d != null && kt[4] > 0f) DepthIntrinsics.scale(kt, kt[4].toInt(), kt[5].toInt(), d.second, d.third) else null
+                val pose = FloatArray(16).also { cam.pose.toMatrix(it, 0) }
+                rs.submit(RoomScanner.Input(rgb, sw, sh, k, pose, d?.first, d?.second ?: 0, d?.third ?: 0, kd, map.floorY), tNs)
+            }
+        }
         while (pending.size > 6) s.frame(pending.removeFirst().second)
 
         s.csv("extras/arcore_frames.jsonl", "", o.toString())
@@ -560,6 +609,7 @@ class ArRecorder(
                 }
             }
         } catch (_: NotYetAvailableException) {} catch (_: IllegalStateException) {}
+        (smSub ?: rawSub)?.let { lastScanDepth = it }
         // -> DepthFusion: raw depth + confidence for the TSDF, dense smoothed depth for the occupancy grid;
         // smoothed alone (TSDF too) when raw depth has not come for a second.
         if (frame.camera.trackingState != TrackingState.TRACKING) return
@@ -622,7 +672,7 @@ class ArRecorder(
         "map %.1f m2  walked %.1f m".format(map.knownAreaM2(), map.travelled),
         "mesh %d tris  blocks %d  fused %d  %.1f ms/frame".format(fusion.liveMesh?.triangles ?: 0, fusion.tsdf.blockCount, fusion.fused, fusion.integrateMs + fusion.filterMs),
         "floor %s".format(if (map.floorY.isNaN()) "?" else "%.2f m".format(map.floorY)),
-    )
+    ) + listOfNotNull(roomScanner?.liveLine())
 
     private fun plane(img: Image, bpp: Int): ByteArray {
         val p = img.planes[0]
