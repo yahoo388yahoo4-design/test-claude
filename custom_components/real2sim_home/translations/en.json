@@ -1,0 +1,125 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Real2Sim Home",
+        "description": "Rooms from the R2S Capture apps, people located in them with pose and heart / breathing rate. RuView ESP32 CSI nodes send to the UDP port below (set their target_ip to this Home Assistant).",
+        "data": {
+          "udp_port": "RuView UDP port (0 = off)",
+          "forward": "Forward RuView packets to (host:port of a RuView sensing server, optional)",
+          "mqtt_topic": "MQTT topic for room maps",
+          "night_start": "Night starts at (hour)",
+          "night_end": "Night ends at (hour)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Real2Sim Home is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Real2Sim Home",
+        "data": {
+          "udp_port": "RuView UDP port (0 = off)",
+          "forward": "Forward RuView packets to (host:port, optional)",
+          "mqtt_topic": "MQTT topic for room maps",
+          "night_start": "Night starts at (hour)",
+          "night_end": "Night ends at (hour)"
+        }
+      },
+      "persons": {
+        "title": "People",
+        "description": "For each person (person|field), optionally pick the sensors that give their room (Bermuda / ESPresense area sensor), heart rate and breathing (fitness band, watch), phone battery and activity. Leave empty to use what is found on their phone / watch devices automatically. People: {people}"
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "occupancy": {
+        "name": "Occupied"
+      }
+    }
+  },
+  "services": {
+    "upload_room_map": {
+      "name": "Upload room map",
+      "description": "Adds or replaces a room from a room_map.json (HOME.md).",
+      "fields": {
+        "room_map": {
+          "name": "Room map",
+          "description": "The room_map.json object."
+        }
+      }
+    },
+    "remove_room": {
+      "name": "Remove room",
+      "description": "Removes a room and its placements.",
+      "fields": {
+        "room_id": {
+          "name": "Room id",
+          "description": "Room id (slug of its name)."
+        }
+      }
+    },
+    "set_room_layout": {
+      "name": "Place room on the home plan",
+      "description": "Position (metres) and rotation of a room on the home plan.",
+      "fields": {
+        "room_id": {
+          "name": "Room id",
+          "description": "Room id."
+        },
+        "x": {
+          "name": "X",
+          "description": "Metres to the right."
+        },
+        "y": {
+          "name": "Y",
+          "description": "Metres up."
+        },
+        "rotation": {
+          "name": "Rotation",
+          "description": "0, 90, 180 or 270 degrees."
+        }
+      }
+    },
+    "place": {
+      "name": "Place a device",
+      "description": "Puts a sensor, camera, RuView node (ruview_<id>) or mmWave radar (radar:<prefix>) at a spot in a room.",
+      "fields": {
+        "item": {
+          "name": "Item",
+          "description": "Entity id, ruview_<node id> or radar:<entity prefix>."
+        },
+        "room_id": {
+          "name": "Room id",
+          "description": "Room id."
+        },
+        "x": {
+          "name": "X",
+          "description": "Metres from the room's left edge."
+        },
+        "y": {
+          "name": "Y",
+          "description": "Metres from the room's bottom edge."
+        },
+        "rotation": {
+          "name": "Rotation",
+          "description": "Radar facing direction, degrees counter-clockwise from 'up the map'."
+        }
+      }
+    },
+    "unplace": {
+      "name": "Unplace a device",
+      "description": "Back to automatic placement.",
+      "fields": {
+        "item": {
+          "name": "Item",
+          "description": "Entity id, ruview_<id> or radar:<prefix>."
+        }
+      }
+    }
+  }
+}

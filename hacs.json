@@ -1,0 +1,6 @@
+{
+  "name": "Real2Sim Home",
+  "content_in_root": false,
+  "render_readme": false,
+  "homeassistant": "2024.12.0"
+}

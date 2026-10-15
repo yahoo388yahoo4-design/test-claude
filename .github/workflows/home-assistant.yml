@@ -1,0 +1,33 @@
+# Real2Sim Home (Home Assistant custom integration): engine / RuView packet tests, then the integration
+# inside a real Home Assistant (pytest-homeassistant-custom-component).
+name: home-assistant
+
+on:
+  push:
+    paths: ["custom_components/**", "tests/**", "tools/home_demo.py", ".github/workflows/home-assistant.yml"]
+  pull_request:
+    paths: ["custom_components/**", "tests/**", "tools/home_demo.py", ".github/workflows/home-assistant.yml"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Home Assistant test harness
+        run: pip install pytest-homeassistant-custom-component home-assistant-frontend
+      - name: Engine + RuView packets
+        run: python -m pytest -q -p no:homeassistant tests/engine
+      - name: Integration in Home Assistant
+        run: python -m pytest -q -c tests/homeassistant/pytest.ini --rootdir . tests/homeassistant
+      - name: Card parses
+        run: node --check custom_components/real2sim_home/frontend/real2sim-home-card.js
+      - name: Package the integration
+        run: cd custom_components && zip -qr ../real2sim_home.zip real2sim_home -x '*/__pycache__/*'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real2sim_home-integration
+          path: real2sim_home.zip

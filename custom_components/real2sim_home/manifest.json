@@ -1,0 +1,13 @@
+{
+  "domain": "real2sim_home",
+  "name": "Real2Sim Home",
+  "codeowners": ["@yahoo388yahoo4-design"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend", "websocket_api", "panel_custom", "person"],
+  "after_dependencies": ["mqtt"],
+  "documentation": "https://github.com/yahoo388yahoo4-design/test-claude/blob/main/HOME.md",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/yahoo388yahoo4-design/test-claude/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

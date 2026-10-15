@@ -1,0 +1,17 @@
+{
+  "format": "r2s-roommap", "version": 1, "id": "living_room", "name": "Living room",
+  "source": {"platform": "ios", "session": "test", "device": "iPhone", "method": "RoomPlan CapturedRoom"},
+  "units": "m", "bounds": [0, 0, 5, 4], "height": 2.5,
+  "floor": [[0, 0], [5, 0], [5, 4], [0, 4]],
+  "walls": [{"a": [0, 0], "b": [5, 0], "height": 2.5}, {"a": [5, 0], "b": [5, 4], "height": 2.5},
+            {"a": [5, 4], "b": [0, 4], "height": 2.5}, {"a": [0, 4], "b": [0, 0], "height": 2.5}],
+  "doors": [{"a": [0, 1], "b": [0, 1.9], "height": 2.0}],
+  "windows": [{"a": [2, 4], "b": [3.5, 4], "height": 1.2}],
+  "openings": [],
+  "objects": [
+    {"id": "sofa_1", "category": "sofa", "label": "Sofa", "center": [2.5, 0.6, 0.4], "size": [2.2, 0.9, 0.8], "yaw": 0},
+    {"id": "tv_1", "category": "tv", "label": "Tv", "center": [2.5, 3.85, 1.1], "size": [1.2, 0.1, 0.7], "yaw": 0},
+    {"id": "table_1", "category": "table", "label": "Table", "center": [2.5, 2.0, 0.37], "size": [1.0, 0.6, 0.45], "yaw": 0},
+    {"id": "chair_1", "category": "chair", "label": "Chair", "center": [4.3, 2.0, 0.45], "size": [0.5, 0.5, 0.9], "yaw": 1.5708}
+  ]
+}
