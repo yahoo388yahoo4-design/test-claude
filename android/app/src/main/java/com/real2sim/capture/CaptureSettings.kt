@@ -30,6 +30,20 @@ class CaptureSettings(private val prefs: SharedPreferences) {
     var geospatial by flag("geospatial", false)
     /** The system "All files access" page was offered once (it stays reachable from the Settings sheet). */
     var askedAllFiles by flag("asked_all_files", false)
+    /** Mode A: detect furniture / appliances and write roommap/room_map.json (HOME.md). */
+    var roomScan by flag("room_scan", true)
+    var roomName: String
+        get() = prefs.getString("room_name", "") ?: ""
+        set(v) = prefs.edit { putString("room_name", v.trim()) }
+    /** Home Assistant base URL (http://homeassistant.local:8123) + long-lived access token for the Real2Sim Home integration. */
+    var haUrl: String
+        get() = prefs.getString("ha_url", "") ?: ""
+        set(v) = prefs.edit { putString("ha_url", v.trim()) }
+    var haToken: String
+        get() = prefs.getString("ha_token", "") ?: ""
+        set(v) = prefs.edit { putString("ha_token", v.trim()) }
+    /** Send each new room map to Home Assistant when the recording stops. */
+    var haAutoSend by flag("ha_auto_send", true)
     var uploadUrl: String
         get() = prefs.getString("upload_url", "") ?: ""
         set(v) = prefs.edit { putString("upload_url", v.trim()) }

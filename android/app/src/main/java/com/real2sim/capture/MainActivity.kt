@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private var arInstallRequested = false
     private var mapView: MapView? = null
     private var coverage: CoverageView? = null
+    private var detOverlay: DetectionOverlay? = null
     private var recStartMs = 0L
     private lateinit var idle: IdlePreview
     private val ui = android.os.Handler(android.os.Looper.getMainLooper())
@@ -153,6 +154,16 @@ class MainActivity : AppCompatActivity() {
                 "GPS is always recorded. Geospatial needs an app built with -PARCORE_API_KEY=…") {
                 toggle("ARCore Geospatial (Earth pose)", s.geospatial, "Mode A, outdoors with Street View coverage") { s.geospatial = it }
             }
+            section("Room map + Home Assistant", "Mode A: furniture and appliances (TV, toilet, chairs, tables, sofa, bed, …) are " +
+                "detected on the phone, placed in 3D with ARCore depth and saved with the floor and walls in roommap/room_map.json. " +
+                "With a Home Assistant URL and long-lived token, the map goes to the Real2Sim Home integration (HOME.md).") {
+                toggle("Map the room (object detection)", s.roomScan, "Mode A") { s.roomScan = it }
+                field("Room name (e.g. Living room)", s.roomName) { s.roomName = it }
+                field("http://homeassistant.local:8123", s.haUrl, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI) { s.haUrl = it }
+                field("Long-lived access token", s.haToken, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD) { s.haToken = it }
+                toggle("Send each room map to Home Assistant", s.haAutoSend) { s.haAutoSend = it }
+                button("Send last room map now") { sendLastRoomMap() }
+            }
             section("Upload receiver (tools/receiver.py)",
                 "Or copy sessions with adb: adb pull ${root.absolutePath.replace("/storage/emulated/0", "/sdcard")}/") {
                 field("http://192.168.1.20:8765#token", s.uploadUrl, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI) { s.uploadUrl = it }
@@ -174,6 +185,13 @@ class MainActivity : AppCompatActivity() {
         thread(name = "upload") {
             try { Uploader.upload(dir, base) { status(it) } } catch (e: Exception) { status("upload failed: $e") }
         }
+    }
+
+    private fun sendLastRoomMap() {
+        val dir = lastSession ?: latestSession()
+        val json = dir?.let { HomeAssistant.roomMapOf(it) }
+        if (json == null) { status("no room map in the last session (record in mode A with room mapping on)"); return }
+        thread(name = "ha-send") { status(HomeAssistant.sendRoomMap(settings.haUrl, settings.haToken, json)) }
     }
 
     private fun showRoot() {
@@ -228,7 +246,7 @@ class MainActivity : AppCompatActivity() {
             when (m) {
                 CaptureMode.RGBD -> {
                     val r = ArRecorder(this, w, ArOptions(hiResStills = s.hiResStills, arcoreMp4 = s.arcoreMp4,
-                        lockFocus = s.lock, geospatial = s.geospatial), ::status)
+                        lockFocus = s.lock, geospatial = s.geospatial, roomScan = s.roomScan, roomName = s.roomName), ::status)
                     arr = r
                     r.create()?.let { err -> r.release(); status(err); abort(err); return }
                     previewHost.addView(r.view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -263,6 +281,7 @@ class MainActivity : AppCompatActivity() {
             // Whatever was set up so far must not stay alive on top of the idle preview.
             ui.removeCallbacks(liveTick)
             mapView?.let { previewHost.removeView(it) }; mapView = null
+            detOverlay?.let { previewHost.removeView(it) }; detOverlay = null
             coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
             arr?.let { ar = null; previewHost.removeView(it.view); try { it.release() } catch (_: Exception) {} }
             c2?.let { cam2 = null; previewHost.removeView(it.previewView); try { it.release() } catch (_: Exception) {} }
@@ -312,6 +331,7 @@ class MainActivity : AppCompatActivity() {
         status("stopping…")
         ui.removeCallbacks(liveTick)
         mapView?.let { previewHost.removeView(it) }; mapView = null
+        detOverlay?.let { previewHost.removeView(it) }; detOverlay = null
         coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
         // Stopping writes the final mesh / map and can take seconds on a big room: do it off the UI thread.
         val r = ar; val c = cam2; val sn = sensors
@@ -333,7 +353,12 @@ class MainActivity : AppCompatActivity() {
                 btnRecord.isEnabled = true
                 setRecordingUi(false)
                 if (!notResumed()) startPreview()
-                status("Saved ${w.dir.name}\n$sum")
+                val room = r?.roomMap
+                status("Saved ${w.dir.name}\n$sum" + (room?.let { "\nroom map: ${it.optJSONArray("objects")?.length() ?: 0} objects, ${it.optJSONArray("walls")?.length() ?: 0} walls" } ?: ""))
+                if (room != null && settings.haAutoSend && settings.haUrl.isNotBlank() && settings.haToken.isNotBlank()) {
+                    val url = settings.haUrl; val tok = settings.haToken
+                    thread(name = "ha-send") { val m = HomeAssistant.sendRoomMap(url, tok, room); runOnUiThread { statusView.append("\n$m") } }
+                }
             }
         }.apply { name = "stop-recording" }.start()
     }
@@ -351,6 +376,11 @@ class MainActivity : AppCompatActivity() {
             gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = topBar.bottom + dp(8); rightMargin = dp(16) })
         mv.setOnLongClickListener { r.cycleLiveView(); true }
         mapView = mv
+        if (r.roomScanner != null) {
+            val ov = DetectionOverlay(this)
+            previewHost.addView(ov, 1, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            detOverlay = ov
+        }
         ui.postDelayed(liveTick, 500)
     }
 
@@ -370,6 +400,7 @@ class MainActivity : AppCompatActivity() {
                             mv.setMap(bm?.first, bm?.second)
                             t.lastOrNull()?.let { p -> mv.setPose(p[0], p[2], r.heading(), t) }
                             stats(lines)
+                            r.roomScanner?.let { rs -> detOverlay?.set(rs.lastDetections, 0.75f) }
                         }
                     } finally { liveBusy = false }
                 }

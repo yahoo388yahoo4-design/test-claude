@@ -9,3 +9,6 @@ out="${TMPDIR:-/tmp}/r2s_navtests"
 # Voice control core (local sentence matcher, LLM tool parsing, Wyoming framing, VAD).
 "${SWIFTC:-swiftc}" -O "$here/../R2SCapture/Voice/VoiceCore.swift" "$here/voice/main.swift" -o "${out}_voice"
 "${out}_voice"
+# Room map core (RoomPlan -> room_map.json floor plan).
+"${SWIFTC:-swiftc}" -O "$here/../R2SCapture/Home/RoomMapCore.swift" "$here/roommap/main.swift" -o "${out}_roommap"
+"${out}_roommap"

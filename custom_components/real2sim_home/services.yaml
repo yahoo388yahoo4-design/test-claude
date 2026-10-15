@@ -1,0 +1,57 @@
+upload_room_map:
+  fields:
+    room_map:
+      required: true
+      selector:
+        object: {}
+remove_room:
+  fields:
+    room_id:
+      required: true
+      selector:
+        text: {}
+set_room_layout:
+  fields:
+    room_id:
+      required: true
+      selector:
+        text: {}
+    x:
+      required: true
+      selector:
+        number: {min: -100, max: 100, step: 0.05, unit_of_measurement: m}
+    y:
+      required: true
+      selector:
+        number: {min: -100, max: 100, step: 0.05, unit_of_measurement: m}
+    rotation:
+      selector:
+        number: {min: 0, max: 270, step: 90, unit_of_measurement: "°"}
+place:
+  fields:
+    item:
+      required: true
+      example: "binary_sensor.hall_motion / ruview_1 / radar:ld2450_living"
+      selector:
+        text: {}
+    room_id:
+      required: true
+      selector:
+        text: {}
+    x:
+      required: true
+      selector:
+        number: {min: 0, max: 50, step: 0.05, unit_of_measurement: m}
+    y:
+      required: true
+      selector:
+        number: {min: 0, max: 50, step: 0.05, unit_of_measurement: m}
+    rotation:
+      selector:
+        number: {min: -180, max: 180, step: 5, unit_of_measurement: "°"}
+unplace:
+  fields:
+    item:
+      required: true
+      selector:
+        text: {}

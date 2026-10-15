@@ -169,9 +169,18 @@ class SessionsActivity : AppCompatActivity() {
 
     /** Long-press menu (iOS context menu). */
     private fun menu(s: SessionSummary) {
-        Ui.alert(this).setTitle(s.name).setItems(arrayOf("Open", "Upload to receiver", "Delete")) { _, i ->
-            when (i) { 0 -> open(s); 1 -> upload(s); else -> confirmDelete(s) }
+        val hasRoom = File(s.dir, "roommap/room_map.json").isFile
+        val items = listOfNotNull("Open", "Upload to receiver", if (hasRoom) "Send room map to Home Assistant" else null, "Delete")
+        Ui.alert(this).setTitle(s.name).setItems(items.toTypedArray()) { _, i ->
+            when (items[i]) { "Open" -> open(s); "Upload to receiver" -> upload(s); "Delete" -> confirmDelete(s); else -> sendRoom(s) }
         }.show()
+    }
+
+    private fun sendRoom(s: SessionSummary) {
+        val p = prefs()
+        val json = HomeAssistant.roomMapOf(s.dir) ?: run { setStatus("no room map in ${s.name}"); return }
+        setStatus("sending room map…")
+        exec.execute { setStatus(HomeAssistant.sendRoomMap(p.getString("ha_url", "").orEmpty(), p.getString("ha_token", "").orEmpty(), json)) }
     }
 
     private fun open(s: SessionSummary) {

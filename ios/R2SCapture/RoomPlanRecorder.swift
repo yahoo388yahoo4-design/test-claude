@@ -12,6 +12,10 @@ final class RoomPlanRecorder: NSObject, RoomCaptureViewDelegate {
     private var exportDir: URL?
     private var onFinished: ((String) -> Void)?
     private(set) var objectCount = 0
+    /// Room name written into roommap/room_map.json (HOME.md); set before [stop].
+    var roomName = ""
+    /// Path of the last room map written (nil if none).
+    private(set) var lastRoomMap: URL?
 
     override init() { super.init() }
 
@@ -65,8 +69,59 @@ final class RoomPlanRecorder: NSObject, RoomCaptureViewDelegate {
             try? data.write(to: dir.appendingPathComponent("room.json"))
         }
         SessionStorage.writeJSON(RoomPlanRecorder.simplified(processedResult), to: dir.appendingPathComponent("objects.json"))
+        // RoomPlan's mesh export (surfaces + objects as meshes) next to the parametric one
+        try? processedResult.export(to: dir.appendingPathComponent("room_mesh.usdz"), exportOptions: .mesh)
+        let mapDir = base.appendingPathComponent("roommap", isDirectory: true)
+        try? FileManager.default.createDirectory(at: mapDir, withIntermediateDirectories: true)
+        let mapURL = mapDir.appendingPathComponent("room_map.json")
+        let map = RoomPlanRecorder.roomMap(processedResult, name: roomName.isEmpty ? "Room" : roomName, session: base.lastPathComponent)
+        SessionStorage.writeJSON(RoomMapCore.withEspNodes(map, session: base) ?? map, to: mapURL)
+        lastRoomMap = mapURL
         objectCount = processedResult.objects.count
         DispatchQueue.main.async { finish?(message) }
+    }
+
+    // MARK: room map (HOME.md roommap/room_map.json)
+
+    static func roomMap(_ room: CapturedRoom, name: String, session: String) -> [String: Any] {
+        func conf(_ c: CapturedRoom.Confidence) -> Double {
+            switch c {
+            case .high: return 0.9
+            case .medium: return 0.6
+            case .low: return 0.3
+            @unknown default: return 0.5
+            }
+        }
+        func element(id: UUID, category: String, confidence: CapturedRoom.Confidence, transform t: simd_float4x4,
+                     dims: simd_float3, parent: UUID?) -> RoomMapCore.Element {
+            var ax = Double(t.columns.0.x), az = Double(t.columns.0.z)
+            let n = (ax * ax + az * az).squareRoot()
+            if n > 1e-6 { ax /= n; az /= n } else { ax = 1; az = 0 }
+            return RoomMapCore.Element(id: id.uuidString, category: category, confidence: conf(confidence),
+                                       cx: Double(t.columns.3.x), cy: Double(t.columns.3.y), cz: Double(t.columns.3.z),
+                                       axisX: ax, axisZ: az, width: Double(dims.x), height: Double(dims.y), depth: Double(dims.z),
+                                       parent: parent?.uuidString)
+        }
+        func surface(_ s: CapturedRoom.Surface, _ cat: String) -> RoomMapCore.Element {
+            element(id: s.identifier, category: cat, confidence: s.confidence, transform: s.transform, dims: s.dimensions, parent: s.parentIdentifier)
+        }
+        var corners: [[Double]] = []
+        var floorY: Double?
+        if let f = room.floors.first {
+            for c in f.polygonCorners {
+                let w = f.transform * simd_float4(c.x, c.y, c.z, 1)
+                corners.append([Double(w.x), Double(w.y), Double(w.z)])
+            }
+            floorY = Double(f.transform.columns.3.y)
+        }
+        let objects = room.objects.map { o in
+            element(id: o.identifier, category: RoomMapCore.category(String(describing: o.category)), confidence: o.confidence,
+                    transform: o.transform, dims: o.dimensions, parent: o.parentIdentifier)
+        }
+        return RoomMapCore.build(name: name, session: session, device: SessionStorage.deviceModel,
+                                 walls: room.walls.map { surface($0, "wall") }, doors: room.doors.map { surface($0, "door") },
+                                 windows: room.windows.map { surface($0, "window") }, openings: room.openings.map { surface($0, "opening") },
+                                 objects: objects, floorCorners: corners, floorY: floorY, nowUnix: Date().timeIntervalSince1970)
     }
 
     // MARK: simplified JSON (FORMAT.md roomplan/objects.json)

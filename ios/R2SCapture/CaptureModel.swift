@@ -13,6 +13,9 @@ final class CaptureModel: ObservableObject {
     @Published private(set) var isFinishing = false
     @Published var status = "Ready"
     @Published var statsLine = ""
+    @Published var home = HomeSettings.load() {
+        didSet { home.save() }
+    }
     @Published var sessions: [URL] = []
     @Published var uploadStatus = ""
     @Published var depthPreview: CGImage?
@@ -146,6 +149,7 @@ final class CaptureModel: ObservableObject {
             ar.stopRecording(saveWorldMap: settings.saveWorldMap) { [weak self] in
                 guard let self = self else { return }
                 self.status = "Processing room…"
+                self.room.roomName = self.home.roomName
                 var finished = false
                 let finishOnce = {
                     if finished { return }
@@ -155,6 +159,9 @@ final class CaptureModel: ObservableObject {
                 self.room.stop(exportTo: dir) { message in
                     self.status = message
                     finishOnce()
+                    if self.home.autoSend && self.home.configured && HomeAssistantClient.hasRoomMap(dir) {
+                        self.sendRoomMap(dir)
+                    }
                 }
                 // RoomPlan may never call back (e.g. scan too short): don't hang forever.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 60) { finishOnce() }
@@ -233,6 +240,19 @@ final class CaptureModel: ObservableObject {
     func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
         refreshSessions()
+    }
+
+    /// roommap/room_map.json of a session -> Home Assistant (Real2Sim Home integration).
+    func sendRoomMap(_ url: URL) {
+        let settings = home
+        uploadStatus = "Sending room map to Home Assistant…"
+        Task {
+            let msg = await HomeAssistantClient.send(session: url, settings: settings)
+            await MainActor.run {
+                self.uploadStatus = msg
+                if !self.isRecording { self.status = msg }
+            }
+        }
     }
 
     func upload(_ url: URL) {
