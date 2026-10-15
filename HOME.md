@@ -54,9 +54,17 @@ place once (below).
   "doors":    [{"a": [x, y], "b": [x, y], "height": 2.0, "parent": "<wall id>"}],
   "windows":  [...], "openings": [...],
   "objects":  [{"id": "tv_1", "category": "tv", "label": "Tv", "confidence": 0.9,
-                "center": [x, y, z], "size": [width, depth, height], "yaw": 0.0, "mesh": "objects/tv_0.ply"}]
+                "center": [x, y, z], "size": [width, depth, height], "yaw": 0.0, "mesh": "objects/tv_0.ply"}],
+  "sensors":  [{"id": "ruview_1", "kind": "ruview", "node_id": 1, "label": "esp-1", "position": [x, y, z],
+                "method": "tap_live", "confidence": 0.9}]
 }
 ```
+
+`sensors` (optional) are devices placed during the scan. The apps fill it from the session's `esp_nodes.json`
+(RuView nodes placed with the ESP32 placement tools, session world frame) moved into the room frame with
+`world_to_room`, when the room map is written and again whenever it is sent. Home Assistant places those RuView
+nodes on the map, unless you have since dragged them by hand. An entry with `entity_id` instead of `node_id`
+places that Home Assistant entity.
 
 `yaw` is the rotation (radians, counter-clockwise) of the object's width axis from +x. Android maps COCO
 labels to the same names iOS uses (`couch` → `sofa`, `dining table` → `table`, `television` → `tv`).

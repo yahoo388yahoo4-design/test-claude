@@ -88,6 +88,16 @@ class Hub:
         room["received"] = time.time()
         new = rid not in self.rooms
         self.rooms[rid] = room
+        # sensors placed during the scan (RuView nodes from esp_nodes.json, or HA entities): positions on the map,
+        # unless someone has placed that item by hand since
+        for s in room.get("sensors") or []:
+            key = f"ruview_{int(s['node_id'])}" if s.get("kind") == "ruview" and "node_id" in s else s.get("entity_id")
+            pos = s.get("position") or []
+            if not key or len(pos) < 2:
+                continue
+            old = self.placements.get(key)
+            if old is None or old.get("source") == "scan":
+                self.placements[key] = {"room_id": rid, "x": float(pos[0]), "y": float(pos[1]), "rotation": 0, "source": "scan"}
         self._save()
         if new:
             async_dispatcher_send(self.hass, SIGNAL_NEW_ROOM, rid)

@@ -39,10 +39,13 @@ async def test_room_map_upload_creates_area_entities_and_state(hass: HomeAssista
     port = _free_udp_port()
     await _setup(hass, port)
     client = await hass_client()
-    resp = await client.post("/api/real2sim_home/room_map", json=ROOM)
+    # RuView node 7 was placed in the app during the scan (esp_nodes.json -> sensors layer)
+    scanned = {**ROOM, "sensors": [{"id": "ruview_7", "kind": "ruview", "node_id": 7, "position": [1.2, 0.8, 1.5]}]}
+    resp = await client.post("/api/real2sim_home/room_map", json=scanned)
     assert resp.status == 200, await resp.text()
     body = await resp.json()
     assert body["id"] == "living_room" and body["objects"] == 4
+    assert hass.data[DOMAIN]["hub"].placements["ruview_7"]["x"] == 1.2
     await hass.async_block_till_done()
     area = ar.async_get(hass).async_get_area_by_name("Living room")
     assert area is not None and body["area_id"] == area.id
@@ -99,6 +102,9 @@ async def test_room_map_upload_creates_area_entities_and_state(hass: HomeAssista
         assert msg["type"] == "event"
     assert msg["success"]
     assert hass.data[DOMAIN]["hub"].placements["ruview_7"] == {"room_id": "living_room", "x": 0.5, "y": 0.5, "rotation": 0}
+    # a later scan does not move a node placed by hand
+    assert (await client.post("/api/real2sim_home/room_map", json=scanned)).status == 200
+    assert hass.data[DOMAIN]["hub"].placements["ruview_7"]["x"] == 0.5
 
 
 async def test_person_with_watch_and_room_sensor(hass: HomeAssistant):

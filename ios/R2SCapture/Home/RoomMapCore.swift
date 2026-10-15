@@ -134,4 +134,38 @@ enum RoomMapCore {
         lower.removeLast(); upper.removeLast()
         return lower + upper
     }
+
+    /// `sensors` layer from the session's esp_nodes.json (RuView CSI nodes placed by the ESP32 placement tools, in the
+    /// session world frame), moved into the room frame with `worldToRoom` (row-major 4x4 of room_map.json).
+    static func sensors(espNodes: [String: Any], worldToRoom m: [Double]) -> [[String: Any]] {
+        guard m.count == 16, let nodes = espNodes["nodes"] as? [[String: Any]] else { return [] }
+        var out: [[String: Any]] = []
+        for n in nodes {
+            guard let id = (n["node_id"] as? NSNumber)?.intValue, let p = n["position"] as? [Any], p.count >= 3 else { continue }
+            let w = p.prefix(3).compactMap { ($0 as? NSNumber)?.doubleValue }
+            guard w.count == 3 else { continue }
+            let pos = (0..<3).map { r -> Double in
+                let v = m[r * 4] * w[0] + m[r * 4 + 1] * w[1] + m[r * 4 + 2] * w[2] + m[r * 4 + 3]
+                return (v * 1000).rounded() / 1000
+            }
+            var e: [String: Any] = ["id": "ruview_\(id)", "kind": "ruview", "node_id": id,
+                                    "label": n["label"] as? String ?? "esp-\(id)", "position": pos]
+            if let meth = n["method"] as? String { e["method"] = meth }
+            if let c = (n["confidence"] as? NSNumber)?.doubleValue { e["confidence"] = c }
+            out.append(e)
+        }
+        return out
+    }
+
+    /// Adds / refreshes `sensors` in a room map from esp_nodes.json in the session folder, when there is one.
+    static func withEspNodes(_ map: [String: Any], session dir: URL) -> [String: Any]? {
+        guard let d = try? Data(contentsOf: dir.appendingPathComponent("esp_nodes.json")),
+              let esp = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+              let m = map["world_to_room"] as? [Any] else { return nil }
+        let s = sensors(espNodes: esp, worldToRoom: m.compactMap { ($0 as? NSNumber)?.doubleValue })
+        if s.isEmpty { return nil }
+        var out = map
+        out["sensors"] = s
+        return out
+    }
 }

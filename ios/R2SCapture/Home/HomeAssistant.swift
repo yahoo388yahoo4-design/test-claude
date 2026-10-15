@@ -32,7 +32,14 @@ enum HomeAssistantClient {
     /// Returns a status line for the UI.
     static func send(session dir: URL, settings: HomeSettings) async -> String {
         guard settings.configured else { return "Home Assistant: set the URL and token in Settings" }
-        guard let body = try? Data(contentsOf: roomMapURL(session: dir)) else { return "No room map in \(dir.lastPathComponent)" }
+        guard var body = try? Data(contentsOf: roomMapURL(session: dir)) else { return "No room map in \(dir.lastPathComponent)" }
+        // RuView nodes placed since the scan (esp_nodes.json) go along as the `sensors` layer
+        if let map = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+           let merged = RoomMapCore.withEspNodes(map, session: dir),
+           let d = try? JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys]) {
+            body = d
+            try? d.write(to: roomMapURL(session: dir), options: .atomic)
+        }
         var base = settings.haURL.trimmingCharacters(in: .whitespaces)
         while base.hasSuffix("/") { base.removeLast() }
         guard let url = URL(string: base + "/api/real2sim_home/room_map") else { return "Home Assistant: bad URL" }

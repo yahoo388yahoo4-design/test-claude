@@ -359,6 +359,10 @@ def validate_room_map(data: Any) -> dict[str, Any]:
     out = dict(data)
     out["name"] = name
     out["id"] = slugify(str(data.get("id") or name))
+    sensors = data.get("sensors") or []
+    if not isinstance(sensors, list):
+        raise ValueError("sensors must be a list")
+    out["sensors"] = [s for s in sensors if isinstance(s, dict)]
     for key in ("walls", "doors", "windows", "openings", "objects"):
         v = data.get(key) or []
         if not isinstance(v, list):

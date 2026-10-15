@@ -164,6 +164,7 @@ class RoomScanner(private val ctx: Context, private val sensorRotation: Int) {
                 } catch (e: Exception) { Log.w(TAG, "crop", e) }
             }
             val json = RoomMapJson.build(name.ifBlank { "Room" }, session, "${Build.MANUFACTURER} ${Build.MODEL}", plan, objects, meshes)
+            dir.parentFile?.let { RoomMapJson.withEspNodes(json, it) }
             dir.mkdirs()
             File(dir, "room_map.json").writeText(json.toString(1))
             return json

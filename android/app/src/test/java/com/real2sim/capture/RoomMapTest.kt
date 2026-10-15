@@ -108,4 +108,18 @@ class RoomMapTest {
         assertEquals(16, j.getJSONArray("world_to_room").length())
         assertEquals(4, j.getJSONArray("walls").length())
     }
+
+    @Test fun espNodesBecomeSensorsInRoomFrame() {
+        // world_to_room: plan x = world x + 1, plan y = -(world z), plan z = world y + 1.2
+        val m = org.json.JSONArray(listOf(1, 0, 0, 1, 0, 0, -1, 0, 0, 1, 0, 1.2, 0, 0, 0, 1))
+        val esp = org.json.JSONObject("""{"version":1,"frame":"session_world","nodes":[
+            {"node_id":3,"label":"esp-3","position":[0.5,0.3,-2.0],"normal":null,"method":"tap_live","confidence":0.8},
+            {"node_id":4,"label":"no position"}]}""")
+        val s = RoomMapJson.sensorsFromEspNodes(esp, m)
+        assertEquals(1, s.length())
+        val n = s.getJSONObject(0)
+        assertEquals("ruview_3", n.getString("id")); assertEquals("ruview", n.getString("kind")); assertEquals(3, n.getInt("node_id"))
+        val p = n.getJSONArray("position")
+        assertEquals(1.5, p.getDouble(0), 1e-6); assertEquals(2.0, p.getDouble(1), 1e-6); assertEquals(1.5, p.getDouble(2), 1e-6)
+    }
 }

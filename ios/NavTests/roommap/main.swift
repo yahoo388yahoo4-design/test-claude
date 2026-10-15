@@ -39,6 +39,16 @@ for rot in [0.0, 0.4, -1.2] {
     }
     check((m["floor"] as! [[Double]]).count == 4, "floor outline is the 4 corners")
 }
+do {
+    let m: [Double] = [1, 0, 0, 1, 0, 0, -1, 0, 0, 1, 0, 1.2, 0, 0, 0, 1]
+    let esp: [String: Any] = ["version": 1, "nodes": [
+        ["node_id": 3, "label": "esp-3", "position": [0.5, 0.3, -2.0], "method": "tap_live", "confidence": 0.8],
+        ["node_id": 4, "label": "no position"]]]
+    let s = RoomMapCore.sensors(espNodes: esp, worldToRoom: m)
+    check(s.count == 1 && s[0]["id"] as? String == "ruview_3" && s[0]["node_id"] as? Int == 3, "esp node -> sensor")
+    let p = s.first?["position"] as? [Double] ?? []
+    check(p.count == 3 && near(p[0], 1.5, 1e-6) && near(p[1], 2.0, 1e-6) && near(p[2], 1.5, 1e-6), "esp node in room frame \(p)")
+}
 check(RoomMapCore.category("washerDryer") == "washer_dryer" && RoomMapCore.category("sofa") == "sofa", "categories")
 print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)

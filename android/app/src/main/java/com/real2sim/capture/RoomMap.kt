@@ -312,6 +312,44 @@ object RoomMapJson {
         }
     }
 
+    /**
+     * `sensors` layer from the session's esp_nodes.json (RuView CSI nodes placed by the ESP32 placement tools,
+     * session world frame) moved into the room frame with [worldToRoom] (row-major 4x4, room_map.json).
+     */
+    fun sensorsFromEspNodes(esp: JSONObject, worldToRoom: JSONArray): JSONArray {
+        val out = JSONArray()
+        if (worldToRoom.length() != 16) return out
+        val m = DoubleArray(16) { worldToRoom.getDouble(it) }
+        val nodes = esp.optJSONArray("nodes") ?: return out
+        for (i in 0 until nodes.length()) {
+            val n = nodes.optJSONObject(i) ?: continue
+            val p = n.optJSONArray("position") ?: continue
+            if (p.length() < 3 || !n.has("node_id")) continue
+            val w = DoubleArray(3) { p.getDouble(it) }
+            fun row(r: Int) = m[r * 4] * w[0] + m[r * 4 + 1] * w[1] + m[r * 4 + 2] * w[2] + m[r * 4 + 3]
+            val id = n.getInt("node_id")
+            out.put(JSONObject().apply {
+                put("id", "ruview_$id"); put("kind", "ruview"); put("node_id", id)
+                put("label", n.optString("label", "esp-$id"))
+                put("position", JSONArray(listOf(row(0), row(1), row(2)).map { (it * 1000).roundToInt() / 1000.0 }))
+                n.optString("method").takeIf { it.isNotEmpty() }?.let { put("method", it) }
+                if (n.has("confidence")) put("confidence", n.optDouble("confidence"))
+            })
+        }
+        return out
+    }
+
+    /** Adds / refreshes `sensors` in [roomMap] from esp_nodes.json in [sessionDir], when there is one. */
+    fun withEspNodes(roomMap: JSONObject, sessionDir: java.io.File): Boolean {
+        val f = java.io.File(sessionDir, "esp_nodes.json")
+        if (!f.isFile) return false
+        val esp = try { JSONObject(f.readText()) } catch (_: Exception) { return false }
+        val s = sensorsFromEspNodes(esp, roomMap.optJSONArray("world_to_room") ?: return false)
+        if (s.length() == 0) return false
+        roomMap.put("sensors", s)
+        return true
+    }
+
     fun normYaw(a: Float): Float { var y = a; while (y > PI) y -= (2 * PI).toFloat(); while (y <= -PI) y += (2 * PI).toFloat(); return y }
     private fun r(v: Float): Double = (v * 1000).roundToInt() / 1000.0
 }

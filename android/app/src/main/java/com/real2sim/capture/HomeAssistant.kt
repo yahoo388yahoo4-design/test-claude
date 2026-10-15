@@ -39,8 +39,13 @@ object HomeAssistant {
         } catch (e: Exception) { "Home Assistant unreachable: ${e.message}" }
     }
 
-    fun roomMapOf(sessionDir: File): JSONObject? =
-        File(sessionDir, "roommap/room_map.json").takeIf { it.isFile }?.let { try { JSONObject(it.readText()) } catch (_: Exception) { null } }
+    /** The session's room map, with the RuView nodes of esp_nodes.json (when placed) as its `sensors` layer. */
+    fun roomMapOf(sessionDir: File): JSONObject? {
+        val f = File(sessionDir, "roommap/room_map.json").takeIf { it.isFile } ?: return null
+        val json = try { JSONObject(f.readText()) } catch (_: Exception) { return null }
+        if (RoomMapJson.withEspNodes(json, sessionDir)) try { f.writeText(json.toString(1)) } catch (_: Exception) {}
+        return json
+    }
 }
 
 /** Live boxes of the object detector over the camera preview (upright image assumed to fill the view, centre-cropped). */

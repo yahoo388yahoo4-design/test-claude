@@ -74,8 +74,8 @@ final class RoomPlanRecorder: NSObject, RoomCaptureViewDelegate {
         let mapDir = base.appendingPathComponent("roommap", isDirectory: true)
         try? FileManager.default.createDirectory(at: mapDir, withIntermediateDirectories: true)
         let mapURL = mapDir.appendingPathComponent("room_map.json")
-        SessionStorage.writeJSON(RoomPlanRecorder.roomMap(processedResult, name: roomName.isEmpty ? "Room" : roomName,
-                                                          session: base.lastPathComponent), to: mapURL)
+        let map = RoomPlanRecorder.roomMap(processedResult, name: roomName.isEmpty ? "Room" : roomName, session: base.lastPathComponent)
+        SessionStorage.writeJSON(RoomMapCore.withEspNodes(map, session: base) ?? map, to: mapURL)
         lastRoomMap = mapURL
         objectCount = processedResult.objects.count
         DispatchQueue.main.async { finish?(message) }
