@@ -1,0 +1,34 @@
+{
+ "version": 1,
+ "tag_size_m": 0.07,
+ "aruco_size_m": 0.035963,
+ "aruco_dict": "DICT_4X4_50",
+ "image_px": 800,
+ "aruco_px": 411,
+ "tags": [
+  {
+   "node_id": 1,
+   "file": "esp_1.png"
+  },
+  {
+   "node_id": 2,
+   "file": "esp_2.png"
+  },
+  {
+   "node_id": 3,
+   "file": "esp_3.png"
+  },
+  {
+   "node_id": 4,
+   "file": "esp_4.png"
+  },
+  {
+   "node_id": 5,
+   "file": "esp_5.png"
+  },
+  {
+   "node_id": 6,
+   "file": "esp_6.png"
+  }
+ ]
+}

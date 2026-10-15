@@ -55,6 +55,10 @@ struct SessionViewer: View {
         }
         .navigationTitle(url.lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // Mark the ESP32 sensing nodes by tapping them in a frame (Esp/EspFrameMarker.swift)
+            NavigationLink("ESP") { EspFrameMarker(url: url) }
+        }
         .task {
             await data.load()
             playback.setUp(videos: data.videos)

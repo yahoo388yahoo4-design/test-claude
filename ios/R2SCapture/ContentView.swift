@@ -85,11 +85,13 @@ struct ContentView: View {
             ZStack {
                 ARPreview(session: model.ar.session)
                 CoverageOverlay(session: model.ar.session, resetToken: model.recordingIndex)
+                if model.isRecording { EspOverlay() }
             }
         case .arkitRoomPlan:
             ZStack {
                 RoomPreview(recorder: model.room, session: model.ar.session)
                 CoverageOverlay(session: model.ar.session, resetToken: model.recordingIndex)
+                if model.isRecording { EspOverlay() }
             }
         case .multiCam:
             ZStack(alignment: .topTrailing) {

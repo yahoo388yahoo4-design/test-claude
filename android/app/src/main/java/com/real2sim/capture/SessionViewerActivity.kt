@@ -2,6 +2,7 @@ package com.real2sim.capture
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -127,6 +128,8 @@ class SessionViewerActivity : AppCompatActivity() {
             tabButtons[name] = b
             tabBar.addView(b)
         }
+        // Mark the ESP32 sensing nodes by tapping them in a frame (EspMarkActivity.kt)
+        tabBar.addView(button("ESP") { startActivity(Intent(this, EspMarkActivity::class.java).putExtra(EspMarkActivity.EXTRA_DIR, dir.absolutePath)) })
         buildTransport()
         show("Video")
     }
