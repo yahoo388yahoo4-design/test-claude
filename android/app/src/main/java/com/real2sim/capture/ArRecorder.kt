@@ -103,6 +103,8 @@ class ArRecorder(
     private var lastPoseM = FloatArray(16)
     private var lastHeading = 0f
     @Volatile var showCloud = true
+    /** ESP32 sensing nodes: tag tracking + tap to place (EspLive.kt). */
+    val esp = EspLive(activity)
 
     // Shared camera (hi-res stills)
     private var shared: SharedCamera? = null
@@ -151,6 +153,7 @@ class ArRecorder(
             if (opt.geospatial && BuildConfig.HAS_ARCORE_API_KEY && session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED))
                 geospatialMode = Config.GeospatialMode.ENABLED
         }
+        s.meta.getJSONObject("android").put("esp_tags", esp.configure(session, cfg))
         try { session.configure(cfg) } catch (e: Exception) {
             cfg.geospatialMode = Config.GeospatialMode.DISABLED
             session.configure(cfg)
@@ -204,6 +207,7 @@ class ArRecorder(
     private fun bitrateFor(w: Int, h: Int) = (w * h * 30 * 0.25).toInt().coerceIn(8_000_000, 120_000_000)
 
     fun start() {
+        esp.begin(s.dir)
         recording = true
         // SharedCamera: the camera is opened from onSurfaceCreated, once ARCore has its texture.
         if (!opt.hiResStills) session.resume()
@@ -222,6 +226,7 @@ class ArRecorder(
         stillReader?.close()
         camThread?.quitSafely()
         encoder?.stop()
+        esp.finish()
         while (pending.isNotEmpty()) s.frame(pending.removeFirst().second)
         listOf(depthBlob, confBlob, sdepthBlob, conf255Blob).forEach { it.close() }
         writeStillJsons()
@@ -277,6 +282,7 @@ class ArRecorder(
             frame.camera.getProjectionMatrix(projM, 0, 0.05f, 50f)
             cloud.visible = showCloud
             cloud.draw(viewM, projM, null, null)
+            try { esp.onFrame(frame, viewM, projM, viewW, viewH, videoIdx - 1) } catch (e: Exception) { Log.w(TAG, "esp", e) }
         }
     }
 

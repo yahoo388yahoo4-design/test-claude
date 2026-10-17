@@ -69,6 +69,10 @@
             android:name=".SessionsActivity"
             android:exported="false" />
         <activity
+            android:name=".EspMarkActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="false" />
+        <activity
             android:name=".SessionViewerActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="false"

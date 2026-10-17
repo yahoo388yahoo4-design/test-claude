@@ -102,6 +102,7 @@ class SessionsActivity : AppCompatActivity() {
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
         fun btn(label: String, onClick: () -> Unit) = Button(this).apply { text = label; isAllCaps = false; setOnClickListener { onClick() } }
         buttons.addView(btn("Open") { open(s) })
+        buttons.addView(btn("ESP") { startActivity(Intent(this, EspMarkActivity::class.java).putExtra(EspMarkActivity.EXTRA_DIR, s.dir.absolutePath)) })
         buttons.addView(btn("Upload") { upload(s) })
         buttons.addView(btn("Delete") { confirmDelete(s) })
         box.addView(buttons)

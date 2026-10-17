@@ -92,6 +92,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         }
         c.isAutoFocusEnabled = !s.lockFocus
         c.providesAudioData = s.recordAudio
+        EspLive.configure(c)   // ESP32 node tags (Esp/EspLive.swift)
         return c
     }
 
@@ -126,6 +127,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     func startRecording(dir: URL, settings s: CaptureSettings) throws {
         settings = s
         self.dir = dir
+        EspLive.shared.begin(dir: dir, session: session)
         framesLog = try LineWriter(url: dir.appendingPathComponent("frames.jsonl"))
         depthBlob = try BlobWriter(url: dir.appendingPathComponent("depth.zlib.bin"))
         confBlob = try BlobWriter(url: dir.appendingPathComponent("conf.zlib.bin"))
@@ -152,6 +154,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     func stopRecording(saveWorldMap: Bool, completion: @escaping () -> Void) {
         queue.async {
             self.isRecording = false
+            EspLive.shared.finish()
             let anchors = self.session.currentFrame?.anchors ?? []
             let dir = self.dir
             self.framesLog?.close()
@@ -231,6 +234,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     private func process(_ frame: ARFrame) {
         trackingText = ARRecorder.trackingString(frame.camera.trackingState)
         guard isRecording, let dir = dir else { return }
+        EspLive.shared.observe(frame)
         let t = frame.timestamp
         guard t > lastTimestamp else { return }
         lastTimestamp = t

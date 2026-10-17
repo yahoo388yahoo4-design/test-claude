@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private var mapView: MapView? = null
     private var hud: HudView? = null
     private var coverage: CoverageView? = null
+    private var espOverlay: EspLiveOverlay? = null
     private val ui = android.os.Handler(android.os.Looper.getMainLooper())
     private val bgExec = java.util.concurrent.Executors.newSingleThreadExecutor()
     @Volatile private var liveBusy = false
@@ -167,6 +168,7 @@ class MainActivity : AppCompatActivity() {
         ui.removeCallbacks(liveTick)
         mapView?.let { previewHost.removeView(it) }; mapView = null
         hud?.let { previewHost.removeView(it) }; hud = null
+        espOverlay?.let { previewHost.removeView(it) }; espOverlay = null
         coverage?.let { it.stop(); previewHost.removeView(it) }; coverage = null
         ar?.let { it.stop(); previewHost.removeView(it.view) }; ar = null
         cam2?.let { it.stop(); previewHost.removeView(it.previewView) }; cam2 = null
@@ -193,6 +195,11 @@ class MainActivity : AppCompatActivity() {
             gravity = android.view.Gravity.TOP or android.view.Gravity.END; topMargin = dp(160); rightMargin = dp(8) })
         mv.setOnLongClickListener { r.showCloud = !r.showCloud; true }
         hud = h; mapView = mv
+        // ESP32 nodes: found from their tags while filming, or tap "Mark ESP" and tap the board (EspLive.kt)
+        espOverlay = EspLiveOverlay(this, r.esp).also {
+            r.esp.overlay = it
+            previewHost.addView(it, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
         ui.postDelayed(liveTick, 500)
     }
 
