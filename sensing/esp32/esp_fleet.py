@@ -201,7 +201,7 @@ def cmd_fetch(a):
 def read_mac(port: str, chip: str) -> str | None:
     if DRY:
         return None
-    r = run([sys.executable, "-m", "esptool", "--chip", chip, "--port", port, "read_mac"], check=False, capture=True)
+    r = run([sys.executable, "-m", "esptool", "--chip", chip, "--port", port, "read-mac"], check=False, capture=True)
     for line in (r.stdout or "").splitlines():
         if line.strip().startswith("MAC:"):
             return line.split("MAC:")[1].strip().lower()
@@ -213,11 +213,11 @@ def flash(fleet: dict, node: dict, port: str, erase: bool):
     v = VARIANTS[fleet["variant"]]
     esptool = [sys.executable, "-m", "esptool", "--chip", fleet["chip"], "--port", port, "--baud", "460800"]
     if erase:
-        run(esptool + ["erase_flash"])
+        run(esptool + ["erase-flash"])
     args = []
     for off, fname in v["files"]:
         args += [off, str(bdir / fname)]
-    run(esptool + ["write_flash", "--flash_mode", "dio", "--flash_size", v["flash_size"]] + args)
+    run(esptool + ["write-flash", "--flash-mode", "dio", "--flash-size", v["flash_size"]] + args)
     node["flashed"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
