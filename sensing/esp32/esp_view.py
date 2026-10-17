@@ -172,7 +172,6 @@ class Live:
 def udp_loop(live: Live, bind: str, port: int, forward: tuple[str, int] | None = None):
     fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if forward else None
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind((bind, port))
     except OSError as e:

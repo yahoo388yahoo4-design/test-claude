@@ -344,7 +344,6 @@ def cmd_monitor(a):
     if a.fleet.exists():
         expected = {n["node_id"] for n in load_fleet(a.fleet)["nodes"]}
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind((a.bind, a.port))
     except OSError as e:
