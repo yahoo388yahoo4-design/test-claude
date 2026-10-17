@@ -334,6 +334,11 @@ def parse_packet(b: bytes) -> dict | None:
     return None
 
 
+def _bpm(x) -> str:
+    """0 means the node has no estimate yet (needs a still person in view)."""
+    return f"{x:.1f}" if x else "-"
+
+
 def cmd_monitor(a):
     expected = set()
     if a.fleet.exists():
@@ -364,7 +369,7 @@ def cmd_monitor(a):
                 dt = time.time() - last
                 last = time.time()
                 print(time.strftime("\n%H:%M:%S"))
-                print(" node  ip               csi/s  rssi  ch-MHz  sub  presence  motion  persons")
+                print(" node  ip               csi/s  rssi  ch-MHz  sub  presence  motion  persons  breath/min  heart/min")
                 for nid in sorted(set(stats) | expected):
                     st = stats.get(nid)
                     if not st:
@@ -376,7 +381,7 @@ def cmd_monitor(a):
                     flag = "  <- below 20/s floor" if pps < 20 else ""
                     print(f" {nid:>4}  {st['ip']:<15} {pps:6.1f}  {c.get('rssi', ''):>4}  {c.get('freq_mhz', ''):>6}  "
                           f"{c.get('n_sub', ''):>3}  {str(v.get('presence', '-')):>8}  {str(v.get('motion', '-')):>6}  "
-                          f"{v.get('persons', '-'):>7}{flag}")
+                          f"{v.get('persons', '-'):>7}  {_bpm(v.get('breathing_bpm')):>10}  {_bpm(v.get('heart_bpm')):>9}{flag}")
                     st["csi"] = st["vitals"] = 0
     except KeyboardInterrupt:
         pass

@@ -52,7 +52,7 @@ cd v2 && cargo run -p wifi-densepose-sensing-server -- --http-port 3000 --source
 ```
 
 Before that, `python esp_fleet.py monitor` (it uses the same UDP port 5005, so run it while the server
-is stopped) shows every node's CSI packets per second, RSSI, channel and presence flags. RuView's
+is stopped) shows every node's CSI packets per second, RSSI, channel, presence flags, and the breathing and heart rate the node estimates. RuView's
 acceptance floor is 20 packets/s per node.
 
 ## 2. Print the tags
