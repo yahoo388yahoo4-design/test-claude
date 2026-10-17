@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP Live View</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: rgba(22, 26, 32, 0.92); --line: #2a313b; --text: #e8ecf1; --muted: #8b95a3;
+    --breath: #4fb3ff; --heart: #ff5d73; --ok: #3ccf7e; --warn: #f5a524; --off: #5b6472;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #view { position: fixed; inset: 0; }
+  #panel { position: fixed; top: 12px; right: 12px; width: 340px; max-height: calc(100% - 24px); overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  h1 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .vitals { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .vital { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .vital .label { color: var(--muted); font-size: 12px; }
+  .vital .value { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .vital .unit { font-size: 12px; color: var(--muted); margin-left: 3px; }
+  .breath .value { color: var(--breath); } .heart .value { color: var(--heart); }
+  canvas.spark { width: 100%; height: 70px; display: block; margin: 4px 0 10px; }
+  .status { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
+  .pill { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  .pill.alert { border-color: var(--heart); color: var(--heart); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 3px 4px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .note { color: var(--muted); font-size: 11px; margin-top: 10px; }
+  #toggle { display: none; }
+  @media (max-width: 640px) {
+    #panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 52%; border-radius: 12px 12px 0 0; }
+    .vital .value { font-size: 24px; }
+    th:nth-child(3), td:nth-child(3) { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="panel">
+  <h1>ESP live view</h1>
+  <div class="sub" id="scanInfo">loading…</div>
+  <div class="vitals">
+    <div class="vital breath"><div class="label">Breathing</div><span class="value" id="br">–</span><span class="unit">/min</span></div>
+    <div class="vital heart"><div class="label">Heart rate</div><span class="value" id="hr">–</span><span class="unit">/min</span></div>
+  </div>
+  <canvas class="spark" id="spark"></canvas>
+  <div class="status" id="status"></div>
+  <table>
+    <thead><tr><th>node</th><th>csi/s</th><th>rssi</th><th>presence</th><th>breath</th><th>heart</th></tr></thead>
+    <tbody id="nodes"></tbody>
+  </table>
+  <div class="note" id="note">Drag to orbit, scroll or pinch to zoom, right-drag to pan. The person marker is a rough
+    estimate from which nodes sense someone; breathing and heart rate come from the nodes.</div>
+</div>
+<script src="three.min.js"></script>
+<script src="OrbitControls.js"></script>
+<script>
+"use strict";
+const C = { breath: "#4fb3ff", heart: "#ff5d73", ok: 0x3ccf7e, warn: 0xf5a524, off: 0x5b6472 };
+const view = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+renderer.setClearColor(0x0f1216);
+view.appendChild(renderer.domElement);
+const scene3 = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, 1, 0.02, 200);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene3.add(new THREE.HemisphereLight(0xffffff, 0x334455, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(3, 6, 2); scene3.add(sun);
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize); resize();
+
+function b64(s, Type) {
+  const bin = atob(s), buf = new ArrayBuffer(bin.length), u8 = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Type(buf);
+}
+
+function label(text, color, scale) {
+  const c = document.createElement("canvas"), g = c.getContext("2d");
+  c.width = 512; c.height = 128;
+  g.font = "600 64px -apple-system, Segoe UI, Roboto, sans-serif";
+  g.fillStyle = "rgba(15,18,22,0.75)";
+  const w = g.measureText(text).width + 40;
+  g.beginPath(); g.roundRect ? g.roundRect((512 - w) / 2, 20, w, 88, 20) : g.rect((512 - w) / 2, 20, w, 88); g.fill();
+  g.fillStyle = color; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(text, 256, 66);
+  const tex = new THREE.CanvasTexture(c);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  s.scale.set(scale * 4, scale, 1); s.renderOrder = 10;
+  s.userData.set = (t, col) => {
+    g.clearRect(0, 0, 512, 128); g.font = "600 64px -apple-system, Segoe UI, Roboto, sans-serif";
+    const w2 = g.measureText(t).width + 40; g.fillStyle = "rgba(15,18,22,0.75)";
+    g.beginPath(); g.roundRect ? g.roundRect((512 - w2) / 2, 20, w2, 88, 20) : g.rect((512 - w2) / 2, 20, w2, 88); g.fill();
+    g.fillStyle = col || color; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(t, 256, 66);
+    tex.needsUpdate = true;
+  };
+  return s;
+}
+
+let SCENE = null;
+const nodeObj = {};          // node_id -> {group, body, ring, label}
+let links = null, person = null, floorY = 0;
+
+function buildScene(sc) {
+  SCENE = sc; floorY = sc.floor_y;
+  const box = new THREE.Box3();
+  const g = sc.geometry;
+  if (g) {
+    const geo = new THREE.BufferGeometry();
+    const pos = b64(g.positions, Float32Array);
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    // colour by height so walls and furniture read without textures
+    const col = new Float32Array(pos.length);
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 1; i < pos.length; i += 3) { lo = Math.min(lo, pos[i]); hi = Math.max(hi, pos[i]); }
+    hi = Math.min(hi, lo + 3);
+    for (let i = 0; i < pos.length; i += 3) {
+      const t = Math.max(0, Math.min(1, (pos[i + 1] - lo) / (hi - lo + 1e-6)));
+      col[i] = 0.35 + 0.35 * t; col[i + 1] = 0.40 + 0.30 * t; col[i + 2] = 0.48 + 0.25 * t;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    let obj;
+    if (g.kind === "mesh") {
+      geo.setIndex(new THREE.BufferAttribute(b64(g.index, Uint32Array), 1));
+      geo.computeVertexNormals();
+      obj = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide,
+        roughness: 0.95, metalness: 0, transparent: true, opacity: 0.85 }));
+    } else {
+      obj = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.025, vertexColors: true }));
+    }
+    scene3.add(obj);
+    geo.computeBoundingBox(); box.union(geo.boundingBox);
+  }
+  for (const n of sc.nodes) box.expandByPoint(new THREE.Vector3(...n.position));
+  const center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+  const span = Math.max(4, size.x, size.z) * 1.2;
+  const grid = new THREE.GridHelper(Math.ceil(span), Math.ceil(span) * 2, 0x3a4350, 0x232a33);
+  grid.position.set(center.x, floorY, center.z); scene3.add(grid);
+
+  for (const n of sc.nodes) {
+    const grp = new THREE.Group(); grp.position.set(...n.position);
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.1, 0.03),
+      new THREE.MeshStandardMaterial({ color: C.off, emissive: C.off, emissiveIntensity: 0.4,
+        transparent: !n.placed, opacity: n.placed ? 1 : 0.45 }));
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.012, 8, 40),
+      new THREE.MeshBasicMaterial({ color: C.warn, transparent: true, opacity: 0 }));
+    const stem = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, floorY - n.position[1], 0)]), new THREE.LineDashedMaterial({ color: 0x3a4350, dashSize: 0.05, gapSize: 0.05 }));
+    stem.computeLineDistances();
+    const lab = label(`ESP ${n.node_id}${n.placed ? "" : " ?"}`, "#e8ecf1", 0.12); lab.position.set(0, 0.16, 0);
+    grp.add(body, ring, stem, lab); scene3.add(grp);
+    nodeObj[n.node_id] = { group: grp, body, ring, label: lab, node: n };
+  }
+  links = new THREE.LineSegments(new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0x4fb3ff, transparent: true, opacity: 0.18 }));
+  scene3.add(links);
+
+  // person: a body capsule plus a chest that swells with the breathing rate
+  person = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffb36b, emissive: 0x663300, emissiveIntensity: 0.4, transparent: true, opacity: 0.85 });
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.14, 0.75, 20), mat); torso.position.y = 1.05;
+  const legs = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.09, 0.7, 16), mat); legs.position.y = 0.35;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 20, 16), mat); head.position.y = 1.6;
+  const heart = new THREE.Mesh(new THREE.SphereGeometry(0.045, 12, 10), new THREE.MeshBasicMaterial({ color: 0xff5d73 }));
+  heart.position.set(0.05, 1.2, 0.16);
+  const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.35, 32), new THREE.MeshBasicMaterial({ color: 0xffb36b, transparent: true, opacity: 0.18 }));
+  shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.005;
+  const plab = label("", "#ffd9b0", 0.16); plab.position.y = 1.95;
+  person.add(torso, legs, head, heart, shadow, plab);
+  person.userData = { torso, heart, label: plab };
+  person.visible = false; scene3.add(person);
+
+  camera.position.set(center.x + span * 0.55, floorY + span * 0.6, center.z + span * 0.75);
+  controls.target.set(center.x, floorY + 0.8, center.z); controls.update();
+
+  const placed = sc.nodes.filter(n => n.placed).length;
+  document.getElementById("scanInfo").textContent =
+    (g ? `Scan: ${g.kind === "mesh" ? "mesh" : "points"} (${g.count.toLocaleString()}) from ${sc.source}. ` : "No scan: nodes only. ") +
+    `${placed} of ${sc.nodes.length} nodes placed` + (placed < sc.nodes.length ? " (\"?\" = stand-in spot)." : ".");
+}
+
+let LIVE = null, personTarget = null;
+
+function update(d) {
+  LIVE = d;
+  const byId = {}; d.nodes.forEach(n => byId[n.node_id] = n);
+  const pts = [];
+  const liveIds = [];
+  for (const [id, o] of Object.entries(nodeObj)) {
+    const n = byId[id];
+    const on = n && n.age < 5;
+    const color = !on ? C.off : (n.presence ? C.warn : C.ok);
+    o.body.material.color.setHex(color); o.body.material.emissive.setHex(color);
+    o.ring.material.opacity = on && n.presence ? 0.25 + 0.7 * Math.min(1, n.presence_score || 0) : 0;
+    o.on = on;
+    if (on) liveIds.push(id);
+  }
+  for (let i = 0; i < liveIds.length; i++) for (let j = i + 1; j < liveIds.length; j++) {
+    pts.push(nodeObj[liveIds[i]].group.position, nodeObj[liveIds[j]].group.position);
+  }
+  links.geometry.setFromPoints(pts);
+
+  if (d.person) {
+    personTarget = new THREE.Vector3(d.person[0], floorY, d.person[2]);
+    if (!person.visible) person.position.copy(personTarget);
+    person.visible = true;
+  } else { person.visible = false; personTarget = null; }
+  const v = d.vitals;
+  document.getElementById("br").textContent = v.breathing ? v.breathing.toFixed(1) : "–";
+  document.getElementById("hr").textContent = v.heart ? Math.round(v.heart) : "–";
+  person.userData.label.userData.set(
+    (v.breathing ? `${v.breathing.toFixed(0)} br` : "– br") + "  ·  " + (v.heart ? `${Math.round(v.heart)} bpm` : "– bpm"));
+  person.userData.rates = v;
+
+  const st = [];
+  const live = d.nodes.filter(n => n.age < 5).length;
+  st.push(`<span class="pill">${live} / ${Object.keys(nodeObj).length} nodes live</span>`);
+  st.push(`<span class="pill">${v.persons || 0} person${v.persons === 1 ? "" : "s"}</span>`);
+  if (v.motion) st.push(`<span class="pill">motion</span>`);
+  if (v.fall) st.push(`<span class="pill alert">fall alert</span>`);
+  document.getElementById("status").innerHTML = st.join("");
+
+  const rows = Object.keys(nodeObj).map(id => {
+    const n = byId[id], on = n && n.age < 5;
+    const col = !on ? "#5b6472" : (n.presence ? "#f5a524" : "#3ccf7e");
+    const f = (x, k) => x == null ? "–" : x.toFixed(k);
+    return `<tr><td><span class="dot" style="background:${col}"></span>ESP ${id}</td>` +
+      (on ? `<td>${f(n.csi_per_s, 0)}</td><td>${n.rssi ?? "–"}</td><td>${n.presence ? f(n.presence_score, 2) : "no"}</td>` +
+            `<td>${f(n.breathing, 1)}</td><td>${f(n.heart, 0)}</td>`
+          : `<td colspan="5" style="color:#5b6472">${n ? `silent ${n.age.toFixed(0)} s` : "no packets"}</td>`) + `</tr>`;
+  });
+  document.getElementById("nodes").innerHTML = rows.join("");
+  drawSpark(d.history);
+}
+
+function drawSpark(h) {
+  const cv = document.getElementById("spark"), r = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * r; cv.height = H * r;
+  const g = cv.getContext("2d"); g.scale(r, r); g.clearRect(0, 0, W, H);
+  g.strokeStyle = "#2a313b"; g.lineWidth = 1; g.beginPath(); g.moveTo(0, H - 0.5); g.lineTo(W, H - 0.5); g.stroke();
+  g.fillStyle = "#8b95a3"; g.font = "10px sans-serif"; g.fillText("last 2 min", 2, 10);
+  const plot = (k, color, lo, hi) => {
+    g.strokeStyle = color; g.lineWidth = 1.5; g.beginPath(); let pen = false;
+    for (const p of h) {
+      const x = W * (1 + p[0] / 120), y = p[k] == null ? null : H - 4 - (H - 16) * (p[k] - lo) / (hi - lo);
+      if (y == null) { pen = false; continue; }
+      pen ? g.lineTo(x, y) : g.moveTo(x, y); pen = true;
+    }
+    g.stroke();
+  };
+  plot(1, C.breath, 5, 30); plot(2, C.heart, 40, 120);
+}
+
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  if (person && person.visible) {
+    if (personTarget) person.position.lerp(personTarget, 0.08);
+    const v = person.userData.rates || {};
+    const br = (v.breathing || 14) / 60, hr = (v.heart || 70) / 60;
+    const s = 1 + 0.06 * Math.sin(2 * Math.PI * br * t);
+    person.userData.torso.scale.set(s, 1, s);
+    const beat = Math.pow(Math.max(0, Math.sin(2 * Math.PI * hr * t)), 8);
+    person.userData.heart.scale.setScalar(1 + 0.6 * beat);
+  }
+  for (const o of Object.values(nodeObj)) {
+    o.ring.rotation.y = t * 1.5;
+    o.ring.scale.setScalar(1 + 0.15 * Math.sin(t * 4));
+  }
+  controls.update();
+  renderer.render(scene3, camera);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("api/live", { cache: "no-store" });
+    if (r.ok) update(await r.json());
+  } catch (e) { document.getElementById("status").innerHTML = '<span class="pill alert">viewer server stopped</span>'; }
+  setTimeout(poll, 500);
+}
+
+fetch("api/scene").then(r => r.json()).then(sc => { buildScene(sc); animate(); poll(); })
+  .catch(() => { document.getElementById("scanInfo").textContent = "Open this page through esp_view.py (http://localhost:8080)."; });
+</script>
+</body>
+</html>

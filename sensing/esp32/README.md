@@ -13,6 +13,7 @@ one coordinate frame.
 | 3. Decide where they go | `esp_place.py` + [PLACEMENT.md](PLACEMENT.md) | `esp_plan.png`: positions and heights for your room |
 | 4. Put them in the 3D scan | phone app (live), or `esp_locate.py` | `<session>/esp_nodes.json` |
 | 5. Check | `esp_fleet.py monitor`, `esp_place.py --check`, `esp_locate.py show` | rates per node, coverage, a picture per node |
+| 6. Watch | `esp_view.py` | live 3D view: scan, nodes, person, breathing and heart rate |
 
 ## What you need
 
@@ -115,6 +116,23 @@ metres), so the nodes line up with everything else exported from that session. `
 `auto_tag` / `auto_tag_live` (tag), `tap_live` / `tap_frame` (one tap with depth), `triangulated`
 (two or more taps without depth) or `planned` (from `esp_place.py`). A tap is never overwritten by a tag
 sighting; `esp_locate.py auto --force` overrides that.
+
+## 6. Watch it live in 3D
+
+```bash
+python esp_view.py --session /path/to/session    # the scan, the nodes from its esp_nodes.json, the person
+python esp_view.py --nodes esp_plan.json         # no scan: the nodes (and the person) in 3D space
+python esp_view.py --demo                        # no boards: simulated nodes and a person walking around
+```
+
+Open http://localhost:8080 (or `http://<this computer>:8080` on a phone). The page shows the room scan
+(mesh, or points fused from depth), each node coloured by state (grey silent, green streaming, orange
+sensing someone), the links between live nodes, and a person figure with the breathing and heart rate the
+nodes report, plus a 2-minute history and a per-node table. It listens on UDP 5005 itself, so stop
+`esp_fleet.py monitor` and the RuView server first. Nodes without a position are drawn at stand-in spots
+marked "?". The person's position is a rough estimate (the presence-weighted centre of the nodes that sense
+someone, because the vitals packets carry no position); RuView's sensing server does proper localisation.
+Works offline: three.js is bundled in `web/`.
 
 ## Tests
 
