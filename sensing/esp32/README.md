@@ -129,7 +129,8 @@ Open http://localhost:8080 (or `http://<this computer>:8080` on a phone). The pa
 (mesh, or points fused from depth), each node coloured by state (grey silent, green streaming, orange
 sensing someone), the links between live nodes, and a person figure with the breathing and heart rate the
 nodes report, plus a 2-minute history and a per-node table. It listens on UDP 5005 itself, so stop
-`esp_fleet.py monitor` and the RuView server first. Nodes without a position are drawn at stand-in spots
+`esp_fleet.py monitor` first; to keep the RuView server running too, start it on port 5006 and add
+`--forward 127.0.0.1:5006`. Nodes without a position are drawn at stand-in spots
 marked "?". The person's position is a rough estimate (the presence-weighted centre of the nodes that sense
 someone, because the vitals packets carry no position); RuView's sensing server does proper localisation.
 Works offline: three.js is bundled in `web/`.

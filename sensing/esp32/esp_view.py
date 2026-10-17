@@ -7,8 +7,9 @@
     python esp_view.py --demo                            # no boards: simulated person walking around
 
 Then open http://localhost:8080 (also from a phone on the same network: http://<this computer>:8080).
-It listens for the nodes' UDP stream itself (port 5005), so stop `esp_fleet.py monitor` and the RuView
-sensing server first. Everything it needs (three.js included) is in this folder; no internet needed.
+It listens for the nodes' UDP stream itself (port 5005), so stop `esp_fleet.py monitor` first. To run the
+RuView sensing server at the same time, start it on another port and add `--forward 127.0.0.1:5006`.
+Everything it needs (three.js included) is in this folder; no internet needed.
 
 The person marker is a rough estimate: the presence-weighted centre of the nodes that sense someone,
 because the nodes' vitals packets carry no position. RuView's sensing server does proper localisation.
@@ -168,7 +169,8 @@ class Live:
         return {"t": now, "nodes": nodes, "person": person, "vitals": vit, "history": hist}
 
 
-def udp_loop(live: Live, bind: str, port: int):
+def udp_loop(live: Live, bind: str, port: int, forward: tuple[str, int] | None = None):
+    fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if forward else None
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -177,6 +179,8 @@ def udp_loop(live: Live, bind: str, port: int):
         sys.exit(f"cannot listen on UDP {port}: {e} (stop esp_fleet.py monitor / the RuView server first)")
     while True:
         b, addr = s.recvfrom(4096)
+        if fwd:
+            fwd.sendto(b, forward)
         p = parse_packet(b)
         if p and p["type"] in ("csi", "vitals"):
             live.packet(p, addr[0])
@@ -251,6 +255,8 @@ def main(argv=None):
     ap.add_argument("--udp", type=int, default=5005, help="UDP port the nodes stream to (default 5005)")
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--max-points", type=int, default=300_000, help="point-cloud limit when the scan has no mesh")
+    ap.add_argument("--forward", metavar="HOST:PORT",
+                    help="also pass every packet on, e.g. 127.0.0.1:5006 for a RuView server started with --udp-bind 127.0.0.1:5006")
     ap.add_argument("--demo", action="store_true", help="simulate the nodes and a person (no boards needed)")
     a = ap.parse_args(argv)
 
@@ -260,7 +266,11 @@ def main(argv=None):
     for n in scene["nodes"]:
         print(f"  node {n['node_id']}: {n['position']}" + ("" if n["placed"] else "  (not placed: stand-in spot)"))
     live = Live(scene)
-    threading.Thread(target=udp_loop, args=(live, a.bind, a.udp), daemon=True).start()
+    fwd = None
+    if a.forward:
+        h, _, p = a.forward.rpartition(":")
+        fwd = (h or "127.0.0.1", int(p))
+    threading.Thread(target=udp_loop, args=(live, a.bind, a.udp, fwd), daemon=True).start()
     if a.demo:
         threading.Thread(target=demo_loop, args=(a.udp, scene), daemon=True).start()
     srv = ThreadingHTTPServer((a.bind, a.http), make_handler(scene, live))
