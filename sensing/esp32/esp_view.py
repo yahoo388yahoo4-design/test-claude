@@ -37,6 +37,10 @@ from esp_fleet import VITALS_MAGIC, parse_packet  # noqa: E402
 
 WEB = HERE / "web"
 HISTORY_S = 120
+SCORE_WINDOW_S = 60      # per-node presence-score range used to normalise it
+PERSON_TAU_S = 3.0       # person marker smoothing
+VITALS_TAU_S = 5.0       # breathing / heart smoothing
+HOLD_S = 10.0            # keep the person and the vitals this long after they drop out
 
 
 # ------------------------------------------------------------------------------------ scene
@@ -107,7 +111,9 @@ class Live:
         self.nodes: dict[int, dict] = {}
         self.history: list[list] = []       # [t, breathing, heart, persons]
         self.person = None
-        self.t0 = time.time()
+        self.last_presence = 0.0
+        self.vit_smooth: dict[str, list] = {}   # key -> [value, last valid time]
+        self.t_prev = time.time()
 
     def packet(self, p: dict, ip: str):
         now = time.time()
@@ -122,6 +128,10 @@ class Live:
             elif p["type"] == "vitals":
                 st["vitals"] = p
                 st["vitals_t"] = now
+                sc = st.setdefault("scores", [])
+                sc.append((now, p["presence_score"]))
+                while sc and now - sc[0][0] > SCORE_WINDOW_S:
+                    sc.pop(0)
 
     def snapshot(self) -> dict:
         now = time.time()
@@ -143,22 +153,13 @@ class Live:
                     "heart": round(v["heart_bpm"], 1) if v and v["heart_bpm"] > 0 else None,
                 })
             live = [n for n in nodes if n["age"] < 5]
-            sensing = [n for n in live if n["presence"] and n["node_id"] in pos]
-            person = None
-            if sensing:
-                w = [max(1e-3, n["presence_score"] or 0) ** 2 for n in sensing]
-                c = [sum(wi * pos[n["node_id"]][k] for wi, n in zip(w, sensing)) / sum(w) for k in range(3)]
-                c[1] = self.scene["floor_y"]
-                if self.person is not None:          # smooth the jumps a little
-                    c = [0.7 * a + 0.3 * b for a, b in zip(self.person, c)]
-                person = c
-            self.person = person
-            br = sorted(n["breathing"] for n in sensing if n["breathing"])
-            hr = sorted(n["heart"] for n in sensing if n["heart"])
+            dt, self.t_prev = now - self.t_prev, now
+            person = self._person(live, pos, now, dt)
             vit = {
-                "breathing": br[len(br) // 2] if br else None,
-                "heart": hr[len(hr) // 2] if hr else None,
-                "persons": max((n["persons"] or 0 for n in live), default=0),
+                "breathing": self._smooth("breathing", live, now, dt),
+                "heart": self._smooth("heart", live, now, dt),
+                # one node's count is noisy; the median over the nodes is steadier than the max
+                "persons": sorted(n["persons"] or 0 for n in live)[len(live) // 2] if live else 0,
                 "fall": any(n["fall"] for n in live),
                 "motion": any(n["motion"] for n in live),
             }
@@ -167,6 +168,53 @@ class Live:
                 self.history = [h for h in self.history if now - h[0] <= HISTORY_S]
             hist = [[round(h[0] - now, 1), h[1], h[2], h[3]] for h in self.history]
         return {"t": now, "nodes": nodes, "person": person, "vitals": vit, "history": hist}
+
+    def _norm_score(self, nid: int) -> float:
+        """This node's presence score relative to its own recent range (0 = its quiet level, 1 = its peak).
+        Raw scores differ a lot between nodes (one reads 3, another 12 for the same person)."""
+        sc = sorted(v for _, v in self.nodes[nid].get("scores", []))
+        if len(sc) < 5:
+            return 0.0
+        lo, hi = sc[len(sc) // 10], sc[-1 - len(sc) // 10]
+        return max(0.0, min(1.0, (self.nodes[nid]["vitals"]["presence_score"] - lo) / (hi - lo + 1e-6)))
+
+    def _person(self, live: list, pos: dict, now: float, dt: float):
+        """Weighted centre of all live nodes by their normalised presence score, smoothed over ~3 s and
+        held for HOLD_S after the last node stopped flagging presence, so it doesn't jump or blink."""
+        if any(n["presence"] for n in live):
+            self.last_presence = now
+        if now - self.last_presence > HOLD_S:
+            self.person = None
+            return None
+        w = {n["node_id"]: self._norm_score(n["node_id"]) ** 2 for n in live if n["node_id"] in pos}
+        tot = sum(w.values())
+        if tot > 1e-3:
+            c = [sum(wi * pos[i][k] for i, wi in w.items()) / tot for k in range(3)]
+            c[1] = self.scene["floor_y"]
+            if self.person is None:
+                self.person = c
+            else:
+                a = 1 - math.exp(-dt / PERSON_TAU_S)
+                self.person = [(1 - a) * p + a * q for p, q in zip(self.person, c)]
+        return self.person
+
+    def _smooth(self, key: str, live: list, now: float, dt: float):
+        """Median over the nodes that sense someone (else all live nodes), smoothed over ~5 s, held 10 s."""
+        sensing = [n[key] for n in live if n["presence"] and n[key]]
+        vals = sorted(sensing or [n[key] for n in live if n[key]])
+        prev = self.vit_smooth.get(key)
+        if vals:
+            m = vals[len(vals) // 2]
+            if prev is None or now - prev[1] > HOLD_S:
+                prev = [m, now]
+            else:
+                a = 1 - math.exp(-dt / VITALS_TAU_S)
+                prev = [(1 - a) * prev[0] + a * m, now]
+            self.vit_smooth[key] = prev
+        elif prev is not None and now - prev[1] > HOLD_S:
+            self.vit_smooth.pop(key)
+            prev = None
+        return round(prev[0], 1) if prev else None
 
 
 def open_udp(bind: str, port: int) -> socket.socket:
