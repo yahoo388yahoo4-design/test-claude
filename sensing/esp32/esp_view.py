@@ -169,13 +169,17 @@ class Live:
         return {"t": now, "nodes": nodes, "person": person, "vitals": vit, "history": hist}
 
 
-def udp_loop(live: Live, bind: str, port: int, forward: tuple[str, int] | None = None):
-    fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if forward else None
+def open_udp(bind: str, port: int) -> socket.socket:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.bind((bind, port))
     except OSError as e:
         sys.exit(f"cannot listen on UDP {port}: {e} (stop esp_fleet.py monitor / the RuView server first)")
+    return s
+
+
+def udp_loop(live: Live, s: socket.socket, forward: tuple[str, int] | None = None):
+    fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if forward else None
     while True:
         b, addr = s.recvfrom(4096)
         if fwd:
@@ -269,7 +273,7 @@ def main(argv=None):
     if a.forward:
         h, _, p = a.forward.rpartition(":")
         fwd = (h or "127.0.0.1", int(p))
-    threading.Thread(target=udp_loop, args=(live, a.bind, a.udp, fwd), daemon=True).start()
+    threading.Thread(target=udp_loop, args=(live, open_udp(a.bind, a.udp), fwd), daemon=True).start()
     if a.demo:
         threading.Thread(target=demo_loop, args=(a.udp, scene), daemon=True).start()
     srv = ThreadingHTTPServer((a.bind, a.http), make_handler(scene, live))

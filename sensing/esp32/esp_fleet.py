@@ -347,7 +347,7 @@ def cmd_monitor(a):
     try:
         s.bind((a.bind, a.port))
     except OSError as e:
-        sys.exit(f"cannot listen on UDP {a.port}: {e} (stop the RuView sensing server while monitoring)")
+        sys.exit(f"cannot listen on UDP {a.port}: {e} (stop esp_view.py or the RuView sensing server first)")
     s.settimeout(0.5)
     stats: dict[int, dict] = {}
     t0 = last = time.time()
